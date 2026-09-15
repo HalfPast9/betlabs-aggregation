@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ObjectStore } from "./objectStore.js";
@@ -25,5 +25,9 @@ export class LocalFsObjectStore implements ObjectStore {
 
   async exists(key: string): Promise<boolean> {
     return existsSync(this.pathFor(key));
+  }
+
+  async delete(key: string): Promise<void> {
+    await rm(this.pathFor(key), { force: true });
   }
 }

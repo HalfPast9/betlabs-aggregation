@@ -73,10 +73,19 @@ describe("submission archive routes", () => {
     expect(submissions[0].channel).toBe("dropbox");
     expect(submissions[0].enrollment.participant.id).toBe(participant.id);
 
+    const staffRes = await ctx.app.inject({
+      method: "POST",
+      url: "/staff-users",
+      headers: authHeaders(),
+      payload: { name: "ops@betlab.example", role: "ops" },
+    });
+    expect(staffRes.statusCode).toBe(201);
+    const opsToken = staffRes.json().token as string;
+
     const mediaRes = await ctx.app.inject({
       method: "GET",
       url: `/submissions/${submissions[0].id}/media`,
-      headers: { ...authHeaders(), "x-staff-actor": "ops@betlab.example" },
+      headers: authHeaders(opsToken),
     });
     expect(mediaRes.statusCode).toBe(200);
     expect(mediaRes.body).toBe("scrolling transaction list bytes");

@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && mkdir -p dist/console && cp src/console/index.html dist/console/index.html",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:migrate:deploy": "prisma migrate deploy",
@@ -17,16 +17,22 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.126.0",
     "@aws-sdk/client-s3": "^3.658.1",
     "@fastify/multipart": "^9.0.1",
     "@prisma/client": "^5.20.0",
     "dotenv": "^16.4.5",
     "dropbox": "^10.34.0",
     "fastify": "^5.12.4",
+    "mailauth": "^5.0.3",
+    "mailparser": "^3.9.28",
+    "nodemailer": "^10.0.10",
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@types/mailparser": "^3.4.6",
     "@types/node": "^20.16.5",
+    "@types/nodemailer": "^8.0.1",
     "light-my-request": "^5.13.0",
     "prisma": "^5.20.0",
     "tsx": "^4.19.1",

@@ -4,6 +4,7 @@ import type {
   DropboxClient,
   DropboxFileEntry,
   ListFolderPage,
+  SpaceUsage,
 } from "./types.js";
 
 export interface RealDropboxClientOptions {
@@ -54,5 +55,14 @@ export class RealDropboxClient implements DropboxClient {
 
   async deleteFile(pathLower: string): Promise<void> {
     await this.dbx.filesDeleteV2({ path: pathLower });
+  }
+
+  async getSpaceUsage(): Promise<SpaceUsage> {
+    const res = await this.dbx.usersGetSpaceUsage();
+    const allocation = res.result.allocation as { ".tag": string; allocated?: number };
+    return {
+      usedBytes: res.result.used,
+      allocatedBytes: typeof allocation.allocated === "number" ? allocation.allocated : null,
+    };
   }
 }

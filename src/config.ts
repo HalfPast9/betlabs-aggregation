@@ -22,6 +22,28 @@ const envSchema = z.object({
   DROPBOX_ACCESS_TOKEN: z.string().optional(),
   DROPBOX_INTAKE_ROOT: z.string().default("/betlab-intake"),
   DROPBOX_POLL_INTERVAL_MS: z.coerce.number().default(60000),
+  // PRD §12 risk: "Dropbox quota fills, uploads silently rejected".
+  DROPBOX_QUOTA_WARNING_THRESHOLD: z.coerce.number().min(0).max(1).default(0.9),
+  DROPBOX_QUOTA_CHECK_INTERVAL_MS: z.coerce.number().default(6 * 60 * 60 * 1000),
+
+  INBOUND_EMAIL_TOKEN: z.string().optional(),
+
+  EMAIL_MODE: z.enum(["fake", "smtp"]).default("fake"),
+  SMTP_HOST: z.string().optional(),
+  SMTP_PORT: z.coerce.number().default(587),
+  SMTP_SECURE: z.coerce.boolean().default(false),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASS: z.string().optional(),
+  SMTP_FROM: z.string().default("intake@betlab.example"),
+
+  VISION_MODE: z.enum(["fake", "claude"]).default("fake"),
+  ANTHROPIC_API_KEY: z.string().optional(),
+  CLAUDE_VISION_MODEL: z.string().default("claude-sonnet-5"),
+
+  EXTRACTOR_VERSION: z.string().default("v1"),
+  FRAME_INTERVAL_SECONDS: z.coerce.number().default(1.5),
+  DEDUP_HAMMING_THRESHOLD: z.coerce.number().default(4),
+  AUTO_EXTRACT_ON_INGEST: z.coerce.boolean().default(true),
 });
 
 export type Config = z.infer<typeof envSchema>;
@@ -36,6 +58,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
   if (parsed.data.DROPBOX_MODE === "real" && !parsed.data.DROPBOX_ACCESS_TOKEN) {
     throw new Error("DROPBOX_ACCESS_TOKEN is required when DROPBOX_MODE=real");
+  }
+  if (parsed.data.EMAIL_MODE === "smtp" && !parsed.data.SMTP_HOST) {
+    throw new Error("SMTP_HOST is required when EMAIL_MODE=smtp");
+  }
+  if (parsed.data.VISION_MODE === "claude" && !parsed.data.ANTHROPIC_API_KEY) {
+    throw new Error("ANTHROPIC_API_KEY is required when VISION_MODE=claude");
   }
   return parsed.data;
 }

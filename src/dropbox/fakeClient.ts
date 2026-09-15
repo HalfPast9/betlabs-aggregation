@@ -5,7 +5,10 @@ import type {
   DropboxClient,
   DropboxFileEntry,
   ListFolderPage,
+  SpaceUsage,
 } from "./types.js";
+
+const DEFAULT_FAKE_ALLOCATED_BYTES = 2 * 1024 * 1024 * 1024 * 1024; // 2TB, a plausible business-plan allocation
 
 interface ChangeLogEntry {
   seq: number;
@@ -21,13 +24,26 @@ interface ChangeLogEntry {
  */
 export class FakeDropboxClient implements DropboxClient {
   private readonly files = new Map<string, Buffer>();
+  private readonly sizeOverrides = new Map<string, number>();
   private readonly changeLog: ChangeLogEntry[] = [];
   private seq = 0;
+
+  constructor(private readonly allocatedBytes = DEFAULT_FAKE_ALLOCATED_BYTES) {}
 
   seedFile(pathLower: string, data: Buffer): void {
     this.files.set(pathLower, data);
     this.seq += 1;
     this.changeLog.push({ seq: this.seq, path: pathLower, type: "add" });
+  }
+
+  /**
+   * Records a file whose *reported* size (for getSpaceUsage) is larger than
+   * the bytes actually stored — lets quota-threshold tests exercise multi-TB
+   * scenarios without allocating multi-TB buffers.
+   */
+  seedFileWithReportedSize(pathLower: string, data: Buffer, reportedSizeBytes: number): void {
+    this.seedFile(pathLower, data);
+    this.sizeOverrides.set(pathLower, reportedSizeBytes);
   }
 
   async createFileRequest(destinationPath: string, _title: string): Promise<CreateFileRequestResult> {
@@ -60,5 +76,13 @@ export class FakeDropboxClient implements DropboxClient {
     }
     this.seq += 1;
     this.changeLog.push({ seq: this.seq, path: pathLower, type: "delete" });
+  }
+
+  async getSpaceUsage(): Promise<SpaceUsage> {
+    let usedBytes = 0;
+    for (const [path, buf] of this.files) {
+      usedBytes += this.sizeOverrides.get(path) ?? buf.byteLength;
+    }
+    return { usedBytes, allocatedBytes: this.allocatedBytes };
   }
 }

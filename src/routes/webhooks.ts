@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { AppDeps } from "../app.js";
 import { verifyDropboxSignature } from "../dropbox/webhook.js";
-import { syncDropbox } from "../dropbox/sync.js";
+import { syncDropbox, buildSyncDeps } from "../dropbox/sync.js";
 
 export async function registerWebhookRoutes(app: FastifyInstance, opts: { deps: AppDeps }) {
   const { deps } = opts;
@@ -25,18 +25,16 @@ export async function registerWebhookRoutes(app: FastifyInstance, opts: { deps: 
       }
     }
 
-    // Ack immediately; Dropbox expects a fast response and will retry on timeout.
-    reply.code(200).send();
-
+    // Dropbox tolerates several seconds here and retries the notification on
+    // timeout; retries are safe (cursor + content-hash dedup make sync
+    // idempotent), so we wait for ingest to actually finish before acking —
+    // otherwise the response would claim success before anything archived.
     try {
-      await syncDropbox({
-        prisma: deps.prisma,
-        dropbox: deps.dropbox,
-        objectStore: deps.objectStore,
-        intakeRoot: deps.intakeRoot,
-      });
+      await syncDropbox(buildSyncDeps(deps));
+      reply.code(200).send();
     } catch (err) {
       app.log.error(err, "dropbox sync failed after webhook notification");
+      reply.code(200).send();
     }
   });
 }

@@ -1,0 +1,580 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Betlab Evidence Archive</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1e222b; --border: #2a2f3a;
+    --text: #e6e8ec; --muted: #8b93a3; --accent: #4f8cff; --danger: #e5534b;
+    --warn: #d99a1b; --ok: #3fb950;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 -apple-system, Segoe UI, Roboto, sans-serif; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  nav { display: flex; gap: 4px; flex: 1; flex-wrap: wrap; }
+  nav a { padding: 6px 10px; border-radius: 6px; color: var(--muted); font-size: 13px; }
+  nav a.active, nav a:hover { background: var(--panel2); color: var(--text); text-decoration: none; }
+  #whoami { font-size: 12px; color: var(--muted); }
+  main { padding: 20px; max-width: 1200px; margin: 0 auto; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  h2 { font-size: 16px; margin: 0 0 12px; }
+  h3 { font-size: 13px; margin: 0 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; }
+  tr:hover td { background: var(--panel2); }
+  input, select, button, textarea { background: var(--panel2); border: 1px solid var(--border); color: var(--text); padding: 6px 8px; border-radius: 6px; font-size: 13px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: white; }
+  button.danger { background: var(--danger); border-color: var(--danger); color: white; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; margin: 1px; }
+  .badge.high { background: rgba(229,83,75,.2); color: #ff8f88; }
+  .badge.warning { background: rgba(217,154,27,.2); color: #f0b93d; }
+  .badge.info { background: rgba(79,140,255,.2); color: #8fb6ff; }
+  .muted { color: var(--muted); }
+  .review-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  video { width: 100%; background: #000; border-radius: 8px; }
+  .rowlist { max-height: 480px; overflow: auto; }
+  .rowlist tr { cursor: pointer; }
+  .rowlist tr.active td { background: rgba(79,140,255,.15); }
+  .login-box { max-width: 360px; margin: 80px auto; }
+  .error { color: var(--danger); }
+  .ok-text { color: var(--ok); }
+  .small { font-size: 12px; }
+  code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<header id="header" style="display:none">
+  <h1>Betlab Archive</h1>
+  <nav id="nav"></nav>
+  <span id="whoami"></span>
+  <button id="logoutBtn">Log out</button>
+</header>
+<main id="app"></main>
+
+<script>
+const API = "";
+const state = { token: localStorage.getItem("betlab_token") || "", me: null };
+
+async function api(path, opts = {}) {
+  const res = await fetch(API + path, {
+    ...opts,
+    headers: { ...(opts.headers || {}), Authorization: "Bearer " + state.token },
+  });
+  if (res.status === 401) { logout(); throw new Error("unauthorized"); }
+  if (!res.ok) {
+    let body;
+    try { body = await res.json(); } catch { body = { error: res.statusText }; }
+    throw new Error(body.error || "request failed");
+  }
+  const ct = res.headers.get("content-type") || "";
+  if (ct.includes("application/json")) return res.json();
+  return res;
+}
+
+function logout() {
+  state.token = ""; state.me = null;
+  localStorage.removeItem("betlab_token");
+  location.hash = "#/login";
+  render();
+}
+
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+function fmtDate(d) { return d ? new Date(d).toLocaleString() : ""; }
+function flagBadges(flags) {
+  if (!flags || !flags.length) return '<span class="muted small">none</span>';
+  return flags.map((f) => `<span class="badge ${esc(f.severity)}" title="${esc(f.detail || "")}">${esc(f.code)}</span>`).join(" ");
+}
+
+const NAV = [
+  ["#/search", "Search"],
+  ["#/funding-queue", "Funding queue"],
+  ["#/wager-queue", "Wager queue"],
+  ["#/participants", "Participants"],
+];
+const ADMIN_NAV = [["#/staff", "Staff"], ["#/retention", "Retention"]];
+
+function renderHeader() {
+  const header = document.getElementById("header");
+  const nav = document.getElementById("nav");
+  const whoami = document.getElementById("whoami");
+  if (!state.me) { header.style.display = "none"; return; }
+  header.style.display = "flex";
+  const items = state.me.role === "admin" ? [...NAV, ...ADMIN_NAV] : NAV;
+  const current = location.hash.split("/")[1] ? "#/" + location.hash.split("/")[1] : "";
+  nav.innerHTML = items
+    .map(([href, label]) => `<a href="${href}" class="${current === href ? "active" : ""}">${label}</a>`)
+    .join("");
+  whoami.textContent = `${state.me.name} (${state.me.role})`;
+}
+
+document.getElementById("logoutBtn").addEventListener("click", logout);
+
+// ---------- Views ----------
+
+async function viewLogin(root) {
+  root.innerHTML = `
+    <div class="panel login-box">
+      <h2>Sign in</h2>
+      <p class="muted small">Paste a staff API token issued by an admin (or the bootstrap STAFF_API_TOKEN).</p>
+      <div class="row"><input id="tokenInput" type="password" placeholder="Bearer token" style="flex:1" /></div>
+      <div class="row"><button class="primary" id="loginBtn">Sign in</button><span id="loginErr" class="error"></span></div>
+    </div>`;
+  root.querySelector("#loginBtn").addEventListener("click", async () => {
+    const token = root.querySelector("#tokenInput").value.trim();
+    if (!token) return;
+    state.token = token;
+    try {
+      const me = await api("/me");
+      state.me = me;
+      localStorage.setItem("betlab_token", token);
+      location.hash = "#/search";
+      render();
+    } catch (e) {
+      root.querySelector("#loginErr").textContent = "Invalid token";
+    }
+  });
+}
+
+async function viewSearch(root) {
+  const q = Object.fromEntries(new URLSearchParams(location.hash.split("?")[1] || ""));
+  root.innerHTML = `
+    <div class="panel">
+      <h2>Submissions</h2>
+      <div class="row">
+        <input id="f-participantId" placeholder="participant id" value="${esc(q.participantId || "")}" />
+        <input id="f-casino" placeholder="casino" value="${esc(q.casino || "")}" />
+        <input id="f-state" placeholder="enrollment state" value="${esc(q.state || "")}" />
+        <input id="f-flag" placeholder="flag code" value="${esc(q.flag || "")}" />
+        <button class="primary" id="searchBtn">Search</button>
+        <button id="exportBtn">Export CSV</button>
+      </div>
+      <table>
+        <thead><tr><th>Received</th><th>Participant</th><th>Casino</th><th>State</th><th>Kind</th><th>Channel</th><th>Flags</th></tr></thead>
+        <tbody id="results"><tr><td colspan="7" class="muted">Loading…</td></tr></tbody>
+      </table>
+    </div>`;
+
+  async function run() {
+    const params = new URLSearchParams();
+    for (const id of ["participantId", "casino", "state", "flag"]) {
+      const v = root.querySelector("#f-" + id).value.trim();
+      if (v) params.set(id, v);
+    }
+    location.hash = "#/search?" + params.toString();
+    const submissions = await api("/submissions?" + params.toString());
+    root.querySelector("#results").innerHTML = submissions.length
+      ? submissions
+          .map(
+            (s) => `<tr onclick="location.hash='#/submission/${s.id}'">
+              <td>${fmtDate(s.receivedAt)}</td>
+              <td>${esc(s.enrollment.participant.contact || s.enrollment.participant.email || s.enrollment.participant.id.slice(0, 8))}</td>
+              <td>${esc(s.enrollment.casino)}</td>
+              <td>${esc(s.enrollment.state)}</td>
+              <td>${esc(s.kind)}</td>
+              <td>${esc(s.channel)}</td>
+              <td>${flagBadges(s.integrityFlags)}</td>
+            </tr>`,
+          )
+          .join("")
+      : `<tr><td colspan="7" class="muted">No submissions match.</td></tr>`;
+  }
+
+  root.querySelector("#searchBtn").addEventListener("click", run);
+  root.querySelector("#exportBtn").addEventListener("click", async () => {
+    const params = new URLSearchParams();
+    for (const id of ["participantId", "casino", "state", "flag"]) {
+      const v = root.querySelector("#f-" + id).value.trim();
+      if (v) params.set(id, v);
+    }
+    const res = await api("/exports/submissions.csv?" + params.toString());
+    const blob = await res.blob();
+    downloadBlob(blob, "submissions.csv");
+  });
+
+  await run();
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+// The core review view (PRD §6.4): extracted rows beside the raw recording,
+// clicking a row seeks the player to the frame it was read from.
+async function viewSubmission(root, id) {
+  root.innerHTML = `<div class="panel"><span class="muted">Loading…</span></div>`;
+  const s = await api("/submissions/" + id);
+  const run = s.extractionRuns[0];
+  const isVideo = /video|mp4|quicktime/.test(s.mediaAsset.mime || "") || s.kind === "wager_recording";
+
+  root.innerHTML = `
+    <div class="panel">
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <h2 style="margin:0">Submission <code>${esc(id.slice(0, 8))}</code></h2>
+          <div class="small muted">
+            <a href="#/participant/${s.enrollment.participant.id}">${esc(s.enrollment.participant.contact || s.enrollment.participant.email || s.enrollment.participant.id)}</a>
+            · ${esc(s.enrollment.casino)} · enrollment state <code>${esc(s.enrollment.state)}</code> · ${esc(s.kind)} via ${esc(s.channel)}
+          </div>
+        </div>
+        <div>${flagBadges(s.integrityFlags)}</div>
+      </div>
+    </div>
+    ${s.mediaAsset.deletedAt
+      ? `<div class="panel error">Raw media was purged under the retention policy on ${fmtDate(s.mediaAsset.deletedAt)}. Structured data below is still intact.</div>`
+      : ""}
+    ${s.emailEvidence
+      ? `<div class="panel">
+          <h3>Email evidence</h3>
+          <table>
+            <tr><th>Tier</th><td>${esc(s.emailEvidence.tier)}</td><th>DKIM</th><td>${esc(s.emailEvidence.dkimResult)}</td></tr>
+            <tr><th>Signer</th><td>${esc(s.emailEvidence.dDomain || "—")}</td><th>Selector</th><td>${esc(s.emailEvidence.selector || "—")}</td></tr>
+            <tr><th>h= covers To</th><td>${s.emailEvidence.hTagCoversTo}</td><th>l= present</th><td>${s.emailEvidence.lTagPresent}</td></tr>
+            <tr><th>From</th><td>${esc(s.emailEvidence.fromAddr || "—")}</td><th>To</th><td>${esc(s.emailEvidence.toAddr || "—")}</td></tr>
+          </table>
+        </div>`
+      : ""}
+    <div class="review-grid">
+      <div class="panel">
+        <h3>Raw evidence</h3>
+        ${s.mediaAsset.deletedAt ? '<p class="muted">Purged.</p>' : isVideo ? '<video id="player" controls></video>' : '<div id="mediaHolder" class="muted">Loading…</div>'}
+      </div>
+      <div class="panel">
+        <h3>Extracted rows ${run ? `<span class="small muted">(run ${fmtDate(run.startedAt)}, ${run.status}${run.costUsd != null ? ", $" + Number(run.costUsd).toFixed(4) : ""})</span>` : ""}</h3>
+        ${
+          run && run.reconciliation
+            ? `<p class="small">Wagered <b>${Number(run.reconciliation.wageredTotal).toFixed(2)}</b>
+               ${run.reconciliation.grantedAmount != null ? `vs granted <b>${Number(run.reconciliation.grantedAmount).toFixed(2)}</b>` : ""}
+               — arithmetic ${run.reconciliation.arithmeticOk ? '<span class="ok-text">ok</span>' : '<span class="error">mismatch</span>'}</p>`
+            : ""
+        }
+        <div class="rowlist">
+          <table>
+            <thead><tr><th>t</th><th>Timestamp</th><th>Type</th><th>Amount</th><th>Balance</th><th>Conf.</th></tr></thead>
+            <tbody id="rowsBody">
+              ${
+                run && run.rows.length
+                  ? run.rows
+                      .map(
+                        (r, i) => `<tr data-t="${r.sourceFrameTs}" id="row-${i}">
+                          <td>${Number(r.sourceFrameTs).toFixed(1)}s</td>
+                          <td>${esc(r.timestamp ? fmtDate(r.timestamp) : "—")}</td>
+                          <td>${esc(r.type || "—")}</td>
+                          <td>${r.amount != null ? Number(r.amount).toFixed(2) : "—"}</td>
+                          <td>${r.balanceAfter != null ? Number(r.balanceAfter).toFixed(2) : "—"}</td>
+                          <td>${r.confidence != null ? Number(r.confidence).toFixed(2) : "—"}</td>
+                        </tr>`,
+                      )
+                      .join("")
+                  : `<tr><td colspan="6" class="muted">No extraction run yet.</td></tr>`
+              }
+            </tbody>
+          </table>
+        </div>
+        <div class="row">
+          <button id="extractBtn">${run ? "Re-run extraction" : "Run extraction"}</button>
+        </div>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>Integrity flags</h3>
+      <table>
+        <thead><tr><th>Code</th><th>Severity</th><th>Detail</th><th>Source</th></tr></thead>
+        <tbody>
+          ${
+            s.integrityFlags.length
+              ? s.integrityFlags
+                  .map((f) => `<tr><td><span class="badge ${esc(f.severity)}">${esc(f.code)}</span></td><td>${esc(f.severity)}</td><td class="small">${esc(f.detail || "")}</td><td class="small muted">${esc(f.generatedBy)}</td></tr>`)
+                  .join("")
+              : `<tr><td colspan="4" class="muted">None.</td></tr>`
+          }
+        </tbody>
+      </table>
+    </div>`;
+
+  if (!s.mediaAsset.deletedAt) {
+    const res = await api(`/submissions/${id}/media`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    if (isVideo) {
+      root.querySelector("#player").src = url;
+    } else {
+      const holder = root.querySelector("#mediaHolder");
+      if (holder) holder.innerHTML = `<img src="${url}" style="max-width:100%;border-radius:8px" />`;
+    }
+  }
+
+  root.querySelectorAll("#rowsBody tr[data-t]").forEach((tr) => {
+    tr.addEventListener("click", () => {
+      root.querySelectorAll("#rowsBody tr").forEach((x) => x.classList.remove("active"));
+      tr.classList.add("active");
+      const player = root.querySelector("#player");
+      if (player) {
+        player.currentTime = parseFloat(tr.dataset.t);
+        player.pause();
+      }
+    });
+  });
+
+  const extractBtn = root.querySelector("#extractBtn");
+  if (extractBtn) {
+    extractBtn.addEventListener("click", async () => {
+      extractBtn.disabled = true; extractBtn.textContent = "Running…";
+      try {
+        await api(`/submissions/${id}/extract`, { method: "POST" });
+        viewSubmission(root, id);
+      } catch (e) {
+        alert("Extraction failed: " + e.message);
+        extractBtn.disabled = false;
+      }
+    });
+  }
+}
+
+async function viewParticipants(root) {
+  root.innerHTML = `
+    <div class="panel">
+      <h2>Participants</h2>
+      <div class="row">
+        <input id="newContact" placeholder="contact (e.g. whatsapp:+1...)" />
+        <input id="newEmail" placeholder="email (optional)" />
+        <button class="primary" id="createBtn">New participant</button>
+      </div>
+      <table>
+        <thead><tr><th>Created</th><th>Contact</th><th>Email</th></tr></thead>
+        <tbody id="pbody"><tr><td colspan="3" class="muted">Loading…</td></tr></tbody>
+      </table>
+    </div>`;
+  async function load() {
+    const list = await api("/participants");
+    root.querySelector("#pbody").innerHTML = list
+      .map((p) => `<tr onclick="location.hash='#/participant/${p.id}'"><td>${fmtDate(p.createdAt)}</td><td>${esc(p.contact || "—")}</td><td>${esc(p.email || "—")}</td></tr>`)
+      .join("");
+  }
+  root.querySelector("#createBtn").addEventListener("click", async () => {
+    const contact = root.querySelector("#newContact").value.trim();
+    const email = root.querySelector("#newEmail").value.trim();
+    await api("/participants", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ contact: contact || undefined, email: email || undefined }) });
+    load();
+  });
+  await load();
+}
+
+async function viewParticipant(root, id) {
+  const p = await api("/participants/" + id);
+  root.innerHTML = `
+    <div class="panel">
+      <h2>${esc(p.contact || p.email || p.id)}</h2>
+      <p class="small muted">Registered email: ${esc(p.email || "—")} · Created ${fmtDate(p.createdAt)}</p>
+      <div class="row"><input id="newCasino" placeholder="casino name" /><button class="primary" id="newEnrollBtn">New enrollment</button></div>
+    </div>
+    ${p.enrollments
+      .map(
+        (e) => `<div class="panel">
+        <div class="row" style="justify-content:space-between">
+          <h3 style="margin:0">${esc(e.casino)} — <code>${esc(e.state)}</code></h3>
+          <div>
+            <button onclick="fileRequestFor('${e.id}')">Create file request</button>
+          </div>
+        </div>
+        ${e.grant ? `<p class="small">Granted ${Number(e.grant.amount).toFixed(2)} on ${fmtDate(e.grant.sentAt)} via ${esc(e.grant.method || "—")}</p>` : ""}
+        <table>
+          <thead><tr><th>Received</th><th>Kind</th><th>Channel</th><th>Flags</th></tr></thead>
+          <tbody>
+            ${e.submissions
+              .map((s) => `<tr onclick="location.hash='#/submission/${s.id}'"><td>${fmtDate(s.receivedAt)}</td><td>${esc(s.kind)}</td><td>${esc(s.channel)}</td><td>${flagBadges(s.integrityFlags)}</td></tr>`)
+              .join("") || `<tr><td colspan="4" class="muted">No submissions yet.</td></tr>`}
+          </tbody>
+        </table>
+      </div>`,
+      )
+      .join("")}`;
+
+  root.querySelector("#newEnrollBtn").addEventListener("click", async () => {
+    const casino = root.querySelector("#newCasino").value.trim();
+    if (!casino) return;
+    await api(`/participants/${id}/enrollments`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ casino }) });
+    viewParticipant(root, id);
+  });
+}
+
+window.fileRequestFor = async (enrollmentId) => {
+  try {
+    const fr = await api(`/enrollments/${enrollmentId}/file-requests`, { method: "POST" });
+    prompt("Paste this link to the participant:", fr.url);
+  } catch (e) {
+    alert("Failed: " + e.message);
+  }
+};
+
+async function viewFundingQueue(root) {
+  root.innerHTML = `<div class="panel"><h2>Funding queue</h2><div id="body" class="muted">Loading…</div></div>`;
+  const list = await api("/enrollments/funding-queue");
+  root.querySelector("#body").innerHTML = list.length
+    ? `<table><thead><tr><th>Participant</th><th>Casino</th><th>Pre-funding checks</th><th></th></tr></thead><tbody>
+        ${list
+          .map(
+            (e) => `<tr>
+              <td><a href="#/participant/${e.participant.id}">${esc(e.participant.contact || e.participant.email || e.participant.id.slice(0, 8))}</a></td>
+              <td>${esc(e.casino)}</td>
+              <td>${e.preFundingChecks.map((c) => `<div class="small ${c.passed ? "" : "error"}">${c.passed ? "✓" : "✗"} ${esc(c.code)} — ${esc(c.detail)}</div>`).join("")}</td>
+              <td><button class="primary" onclick="fundEnrollment('${e.id}')">Fund…</button></td>
+            </tr>`,
+          )
+          .join("")}
+      </tbody></table>`
+    : `<p class="muted">Nothing pending.</p>`;
+}
+
+window.fundEnrollment = async (id) => {
+  const amount = prompt("Grant amount (leave blank to skip recording a grant now):");
+  const note = prompt("Note for the decision record:") || "";
+  const body = { note };
+  if (amount) body.grant = { amount: Number(amount), sentAt: new Date().toISOString() };
+  try {
+    await api(`/enrollments/${id}/fund`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    render();
+  } catch (e) {
+    alert("Failed: " + e.message);
+  }
+};
+
+async function viewWagerQueue(root) {
+  root.innerHTML = `<div class="panel"><h2>Wager verification queue</h2><div id="body" class="muted">Loading…</div></div>`;
+  const list = await api("/enrollments/wager-queue");
+  root.querySelector("#body").innerHTML = list.length
+    ? `<table><thead><tr><th>Participant</th><th>Casino</th><th>Submissions</th><th></th></tr></thead><tbody>
+        ${list
+          .map(
+            (e) => `<tr>
+              <td><a href="#/participant/${e.participant.id}">${esc(e.participant.contact || e.participant.email || e.participant.id.slice(0, 8))}</a></td>
+              <td>${esc(e.casino)}</td>
+              <td>${e.submissions.map((s) => `<a href="#/submission/${s.id}">${esc(s.id.slice(0, 8))}</a>`).join(", ")}</td>
+              <td><button class="primary" onclick="verifyWager('${e.id}')">Verify…</button></td>
+            </tr>`,
+          )
+          .join("")}
+      </tbody></table>`
+    : `<p class="muted">Nothing pending.</p>`;
+}
+
+window.verifyWager = async (id) => {
+  const note = prompt("Note for the decision record:") || "";
+  try {
+    await api(`/enrollments/${id}/verify-wager`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ note }) });
+    render();
+  } catch (e) {
+    alert("Failed: " + e.message);
+  }
+};
+
+async function viewStaff(root) {
+  root.innerHTML = `
+    <div class="panel">
+      <h2>Staff access</h2>
+      <div class="row">
+        <input id="newName" placeholder="name / email" />
+        <select id="newRole"><option value="ops">ops</option><option value="admin">admin</option></select>
+        <button class="primary" id="createBtn">Create staff user</button>
+      </div>
+      <table><thead><tr><th>Name</th><th>Role</th><th>Created</th><th></th></tr></thead><tbody id="sbody"></tbody></table>
+    </div>`;
+  async function load() {
+    const list = await api("/staff-users");
+    root.querySelector("#sbody").innerHTML = list
+      .map((s) => `<tr><td>${esc(s.name)}</td><td>${esc(s.role)}</td><td>${fmtDate(s.createdAt)}</td><td><button class="danger" onclick="deleteStaff('${s.id}')">Remove</button></td></tr>`)
+      .join("");
+  }
+  root.querySelector("#createBtn").addEventListener("click", async () => {
+    const name = root.querySelector("#newName").value.trim();
+    const role = root.querySelector("#newRole").value;
+    if (!name) return;
+    const res = await api("/staff-users", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, role }) });
+    alert(`Token for ${name} (shown once):\n\n${res.token}`);
+    load();
+  });
+  await load();
+}
+
+window.deleteStaff = async (id) => {
+  if (!confirm("Revoke this staff user's access?")) return;
+  await api(`/staff-users/${id}`, { method: "DELETE" });
+  render();
+};
+
+async function viewRetention(root) {
+  const settings = await api("/retention-settings");
+  root.innerHTML = `
+    <div class="panel">
+      <h2>Retention policy</h2>
+      <p class="small muted">PRD §9 — raw media is deleted after the window below; structured/extracted data and decision records are kept indefinitely regardless.</p>
+      <div class="row">
+        <label>Raw media (days) <input id="raw" type="number" value="${settings.rawMediaRetentionDays}" style="width:80px" /></label>
+        <label>Funded signup-email evidence (days) <input id="funded" type="number" value="${settings.fundedEmailEvidenceRetentionDays}" style="width:80px" /></label>
+        <button class="primary" id="saveBtn">Save</button>
+        <button id="runBtn">Run now</button>
+      </div>
+      <div id="msg" class="small"></div>
+    </div>`;
+  root.querySelector("#saveBtn").addEventListener("click", async () => {
+    await api("/retention-settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        rawMediaRetentionDays: Number(root.querySelector("#raw").value),
+        fundedEmailEvidenceRetentionDays: Number(root.querySelector("#funded").value),
+      }),
+    });
+    root.querySelector("#msg").innerHTML = '<span class="ok-text">Saved.</span>';
+  });
+  root.querySelector("#runBtn").addEventListener("click", async () => {
+    const result = await api("/retention/run", { method: "POST" });
+    root.querySelector("#msg").textContent = `Deleted ${result.deleted}, skipped ${result.skipped}.`;
+  });
+}
+
+// ---------- Router ----------
+
+async function render() {
+  const root = document.getElementById("app");
+  const hash = location.hash || "#/search";
+  const [path, id] = hash.replace("#/", "").split("?")[0].split("/");
+
+  if (!state.token) { renderHeader(); return viewLogin(root); }
+  if (!state.me) {
+    try { state.me = await api("/me"); } catch { return; }
+  }
+  renderHeader();
+
+  try {
+    if (path === "login") return viewLogin(root);
+    if (path === "search" || path === "") return viewSearch(root);
+    if (path === "submission" && id) return viewSubmission(root, id);
+    if (path === "participants") return viewParticipants(root);
+    if (path === "participant" && id) return viewParticipant(root, id);
+    if (path === "funding-queue") return viewFundingQueue(root);
+    if (path === "wager-queue") return viewWagerQueue(root);
+    if (path === "staff") return viewStaff(root);
+    if (path === "retention") return viewRetention(root);
+    root.innerHTML = `<div class="panel">Not found.</div>`;
+  } catch (e) {
+    root.innerHTML = `<div class="panel error">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+window.addEventListener("hashchange", render);
+render();
+</script>
+</body>
+</html>

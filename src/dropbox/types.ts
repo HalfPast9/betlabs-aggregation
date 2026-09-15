@@ -17,6 +17,12 @@ export interface CreateFileRequestResult {
   url: string;
 }
 
+export interface SpaceUsage {
+  usedBytes: number;
+  /** null when the account's allocation type isn't one we recognize. */
+  allocatedBytes: number | null;
+}
+
 /**
  * Everything the ingest pipeline needs from Dropbox, narrowed to our use case
  * (PRD §6.1). Swappable between a fake in-memory implementation (used in tests
@@ -31,4 +37,6 @@ export interface DropboxClient {
   listFolder(folderPath: string, cursor?: string): Promise<ListFolderPage>;
   download(pathLower: string): Promise<Buffer>;
   deleteFile(pathLower: string): Promise<void>;
+  /** PRD §12 risk: "Dropbox quota fills, uploads silently rejected" — this is the mitigation's data source. */
+  getSpaceUsage(): Promise<SpaceUsage>;
 }

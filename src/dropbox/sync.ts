@@ -2,12 +2,43 @@ import type { PrismaClient } from "@prisma/client";
 import type { DropboxClient } from "./types.js";
 import type { ObjectStore } from "../storage/objectStore.js";
 import { sha256Hex } from "../lib/hash.js";
+import { handleWagerRecordingSubmitted } from "../enrollment/wagerRecordingIngested.js";
+import { runExtraction } from "../extraction/runExtraction.js";
+import type { VisionExtractor } from "../extraction/visionExtractor.js";
+import type { AppDeps } from "../app.js";
+
+export interface AutoExtractConfig {
+  visionExtractor: VisionExtractor;
+  extractorVersion: string;
+  frameIntervalSeconds: number;
+  dedupHammingThreshold: number;
+}
 
 export interface SyncDeps {
   prisma: PrismaClient;
   dropbox: DropboxClient;
   objectStore: ObjectStore;
   intakeRoot: string;
+  /** When set, extraction runs automatically right after a wager recording is archived. */
+  autoExtract?: AutoExtractConfig;
+}
+
+/** Shared by the webhook handler and the polling job so their SyncDeps never drift apart. */
+export function buildSyncDeps(deps: AppDeps): SyncDeps {
+  return {
+    prisma: deps.prisma,
+    dropbox: deps.dropbox,
+    objectStore: deps.objectStore,
+    intakeRoot: deps.intakeRoot,
+    autoExtract: deps.autoExtractOnIngest
+      ? {
+          visionExtractor: deps.visionExtractor,
+          extractorVersion: deps.extractorVersion,
+          frameIntervalSeconds: deps.frameIntervalSeconds,
+          dedupHammingThreshold: deps.dedupHammingThreshold,
+        }
+      : undefined,
+  };
 }
 
 export interface SyncResult {
@@ -66,11 +97,11 @@ export async function syncDropbox(deps: SyncDeps): Promise<SyncResult> {
 
       await objectStore.put(contentHash, data);
 
-      await prisma.$transaction(async (tx) => {
+      const { submissionId, advancedToWagerSubmitted } = await prisma.$transaction(async (tx) => {
         const mediaAsset = await tx.mediaAsset.create({
           data: { blobKey: contentHash, contentHash, bytes: data.byteLength },
         });
-        await tx.submission.create({
+        const submission = await tx.submission.create({
           data: {
             enrollmentId,
             kind: "wager_recording",
@@ -79,6 +110,14 @@ export async function syncDropbox(deps: SyncDeps): Promise<SyncResult> {
             contentHash,
           },
         });
+
+        const { advancedToWagerSubmitted } = await handleWagerRecordingSubmitted(
+          tx,
+          enrollment,
+          submission.id,
+          "dropbox-sync",
+        );
+        return { submissionId: submission.id, advancedToWagerSubmitted };
       });
 
       ingested++;
@@ -86,6 +125,24 @@ export async function syncDropbox(deps: SyncDeps): Promise<SyncResult> {
       // is transport, not storage). A failed purge just leaves the file for
       // the next poll — the contentHash dedup above prevents double-ingest.
       await safeDelete(dropbox, entry.pathLower);
+
+      if (advancedToWagerSubmitted && deps.autoExtract) {
+        try {
+          await runExtraction(
+            {
+              prisma,
+              objectStore,
+              visionExtractor: deps.autoExtract.visionExtractor,
+              extractorVersion: deps.autoExtract.extractorVersion,
+              frameIntervalSeconds: deps.autoExtract.frameIntervalSeconds,
+              dedupHammingThreshold: deps.autoExtract.dedupHammingThreshold,
+            },
+            submissionId,
+          );
+        } catch (err) {
+          console.error(`Auto-extraction failed for submission ${submissionId}:`, err);
+        }
+      }
     }
 
     cursor = page.cursor;

@@ -11,6 +11,8 @@ export interface ObjectStore {
   put(key: string, data: Buffer): Promise<void>;
   get(key: string): Promise<Buffer>;
   exists(key: string): Promise<boolean>;
+  /** Used only by the retention job (PRD §9) — everywhere else, media is write-once. */
+  delete(key: string): Promise<void>;
 }
 
 export function createObjectStore(config: Config): ObjectStore {
