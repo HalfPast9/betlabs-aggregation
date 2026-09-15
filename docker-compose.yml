@@ -1,0 +1,15 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: betlab
+      POSTGRES_PASSWORD: betlab
+      POSTGRES_DB: betlab_archive
+    ports:
+      - "5432:5432"
+    volumes:
+      - betlab_db_data:/var/lib/postgresql/data
+
+volumes:
+  betlab_db_data:

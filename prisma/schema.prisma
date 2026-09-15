@@ -1,0 +1,95 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Participant {
+  id          String       @id @default(uuid())
+  contact     String?
+  email       String?
+  createdAt   DateTime     @default(now())
+  enrollments Enrollment[]
+
+  @@map("participant")
+}
+
+model Enrollment {
+  id            String        @id @default(uuid())
+  participantId String
+  participant   Participant   @relation(fields: [participantId], references: [id])
+  casino        String
+  // Full lifecycle transitions land in M1 (PRD §6.5); this is a placeholder state for now.
+  state         String        @default("invited")
+  createdAt     DateTime      @default(now())
+  fileRequests  FileRequest[]
+  submissions   Submission[]
+
+  @@index([participantId])
+  @@map("enrollment")
+}
+
+model FileRequest {
+  id               String     @id @default(uuid())
+  enrollmentId     String
+  enrollment       Enrollment @relation(fields: [enrollmentId], references: [id])
+  dropboxRequestId String     @unique
+  url              String
+  destinationPath  String
+  createdAt        DateTime   @default(now())
+
+  @@map("file_request")
+}
+
+model MediaAsset {
+  id          String      @id @default(uuid())
+  blobKey     String      @unique
+  mime        String?
+  bytes       Int
+  contentHash String      @unique
+  sourceMeta  Json?
+  createdAt   DateTime    @default(now())
+  submission  Submission?
+
+  @@map("media_asset")
+}
+
+model Submission {
+  id           String      @id @default(uuid())
+  enrollmentId String
+  enrollment   Enrollment  @relation(fields: [enrollmentId], references: [id])
+  kind         String
+  channel      String
+  receivedAt   DateTime    @default(now())
+  mediaAssetId String      @unique
+  mediaAsset   MediaAsset  @relation(fields: [mediaAssetId], references: [id])
+  contentHash  String
+  supersededBy String?
+  createdAt    DateTime    @default(now())
+
+  @@index([enrollmentId])
+  @@index([receivedAt])
+  @@map("submission")
+}
+
+// Singleton row (id is always "default") holding the Dropbox list_folder cursor.
+model DropboxCursor {
+  id        String   @id @default("default")
+  cursor    String?
+  updatedAt DateTime @updatedAt
+
+  @@map("dropbox_cursor")
+}
+
+model AuditEvent {
+  id     String   @id @default(uuid())
+  actor  String
+  action String
+  target String
+  at     DateTime @default(now())
+
+  @@map("audit_event")
+}
