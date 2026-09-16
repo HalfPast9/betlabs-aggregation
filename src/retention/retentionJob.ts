@@ -55,7 +55,7 @@ export async function runRetentionJob(prisma: PrismaClient, objectStore: ObjectS
 
   const candidates = await prisma.mediaAsset.findMany({
     where: { deletedAt: null },
-    include: { submission: { include: { enrollment: true } } },
+    include: { submission: { include: { enrollment: true, extractionRuns: true } } },
   });
 
   let deleted = 0;
@@ -81,6 +81,13 @@ export async function runRetentionJob(prisma: PrismaClient, objectStore: ObjectS
     }
 
     await objectStore.delete(asset.blobKey);
+    // Stitched panoramas are the raw recording in another shape — same liability, same window.
+    for (const run of submission.extractionRuns) {
+      if (run.panoramaBlobKey) {
+        await objectStore.delete(run.panoramaBlobKey);
+        await prisma.extractionRun.update({ where: { id: run.id }, data: { panoramaBlobKey: null } });
+      }
+    }
     await prisma.mediaAsset.update({ where: { id: asset.id }, data: { deletedAt: new Date() } });
     deleted++;
   }

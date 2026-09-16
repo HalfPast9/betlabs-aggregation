@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -20,46 +20,6 @@ function runFfmpeg(args: string[]): Promise<{ stdout: Buffer; stderr: string }> 
       resolve({ stdout: Buffer.concat(stdoutChunks), stderr });
     });
   });
-}
-
-export interface SampledFrame {
-  index: number;
-  timestampSeconds: number;
-  jpegBuffer: Buffer;
-}
-
-/**
- * Samples frames from a video at a fixed interval (PRD §6.3 step 1). Writes
- * to a temp dir because ffmpeg needs seekable input for most containers.
- */
-export async function sampleFrames(videoBuffer: Buffer, intervalSeconds: number): Promise<SampledFrame[]> {
-  const dir = await mkdtemp(join(tmpdir(), "betlab-frames-"));
-  try {
-    const inputPath = join(dir, "input.mp4");
-    await writeFile(inputPath, videoBuffer);
-
-    const pattern = join(dir, "frame_%05d.jpg");
-    await runFfmpeg([
-      "-y",
-      "-i",
-      inputPath,
-      "-vf",
-      `fps=1/${intervalSeconds}`,
-      "-q:v",
-      "3",
-      pattern,
-    ]);
-
-    const files = (await readdir(dir)).filter((f) => f.startsWith("frame_")).sort();
-    const frames: SampledFrame[] = [];
-    for (let i = 0; i < files.length; i++) {
-      const jpegBuffer = await readFile(join(dir, files[i]!));
-      frames.push({ index: i, timestampSeconds: i * intervalSeconds, jpegBuffer });
-    }
-    return frames;
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
 }
 
 const THUMB_WIDTH = 9;

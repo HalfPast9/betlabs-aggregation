@@ -4,8 +4,10 @@ import type { AppDeps } from "../app.js";
 import { requireStaffAuth } from "../lib/auth.js";
 import { sha256Hex } from "../lib/hash.js";
 import { handleWagerRecordingSubmitted } from "../enrollment/wagerRecordingIngested.js";
+import { handleEmailEvidenceSubmitted } from "../enrollment/emailEvidenceIngested.js";
 import { checkManualIntake } from "../integrity/simpleFlags.js";
 import { runExtraction } from "../extraction/runExtraction.js";
+import { verifyEmailEvidence } from "../email/verifyEmailEvidence.js";
 
 const searchQuerySchema = z.object({
   participantId: z.string().optional(),
@@ -55,10 +57,25 @@ export async function registerSubmissionRoutes(app: FastifyInstance, opts: { dep
       return;
     }
 
+    // DKIM verification does real DNS I/O — run it before opening the
+    // transaction, same rule as the automated inbound-email path. A runner
+    // relaying a real .eml gets the exact same verification and tier as one
+    // that arrived through the automated matcher (PRD §7.2) — which door it
+    // came through shouldn't change how much the evidence is worth.
+    const emailEvidence =
+      kind === "signup_email"
+        ? await verifyEmailEvidence(deps.prisma, enrollment.casino, fileBuffer, deps.dkimResolver)
+        : null;
+
     await deps.objectStore.put(contentHash, fileBuffer);
     const { submission, advancedToWagerSubmitted } = await deps.prisma.$transaction(async (tx) => {
       const mediaAsset = await tx.mediaAsset.create({
-        data: { blobKey: contentHash, contentHash, bytes: fileBuffer!.byteLength },
+        data: {
+          blobKey: contentHash,
+          contentHash,
+          bytes: fileBuffer!.byteLength,
+          mime: kind === "signup_email" ? "message/rfc822" : undefined,
+        },
       });
       const submission = await tx.submission.create({
         data: {
@@ -91,6 +108,11 @@ export async function registerSubmissionRoutes(app: FastifyInstance, opts: { dep
           submission.id,
           "manual-upload-route",
         ));
+      } else if (kind === "signup_email" && emailEvidence) {
+        await tx.emailEvidence.create({
+          data: { submissionId: submission.id, verifiedAt: new Date(), ...emailEvidence },
+        });
+        await handleEmailEvidenceSubmitted(tx, enrollment, emailEvidence.dkimResult, emailEvidence.tier);
       }
 
       return { submission, advancedToWagerSubmitted };
@@ -104,8 +126,7 @@ export async function registerSubmissionRoutes(app: FastifyInstance, opts: { dep
             objectStore: deps.objectStore,
             visionExtractor: deps.visionExtractor,
             extractorVersion: deps.extractorVersion,
-            frameIntervalSeconds: deps.frameIntervalSeconds,
-            dedupHammingThreshold: deps.dedupHammingThreshold,
+            panoramaFps: deps.panoramaFps,
           },
           submission.id,
         );
@@ -155,7 +176,7 @@ export async function registerSubmissionRoutes(app: FastifyInstance, opts: { dep
         integrityFlags: true,
         emailEvidence: true,
         extractionRuns: {
-          include: { rows: { orderBy: { sourceFrameTs: "asc" } }, reconciliation: true },
+          include: { rows: { orderBy: { sequence: "asc" } }, reconciliation: true },
           orderBy: { startedAt: "desc" },
         },
       },
@@ -194,5 +215,28 @@ export async function registerSubmissionRoutes(app: FastifyInstance, opts: { dep
     reply
       .type(submission.mediaAsset.mime ?? "application/octet-stream")
       .send(data);
+  });
+
+  // The stitched list an extraction run read from. Derived from the raw
+  // media, so it gets the same PRD §9 access audit.
+  app.get<{ Params: { id: string; runId: string } }>("/submissions/:id/extraction-runs/:runId/panorama", async (request, reply) => {
+    const run = await deps.prisma.extractionRun.findFirst({
+      where: { id: request.params.runId, submissionId: request.params.id },
+    });
+    if (!run || !run.panoramaBlobKey) {
+      reply.code(404).send({ error: "no panorama for this extraction run" });
+      return;
+    }
+    let data: Buffer;
+    try {
+      data = await deps.objectStore.get(run.panoramaBlobKey);
+    } catch {
+      reply.code(410).send({ error: "panorama no longer in the object store" });
+      return;
+    }
+    await deps.prisma.auditEvent.create({
+      data: { actor: request.staffUser?.name ?? "unknown-staff", action: "view_panorama", target: request.params.id },
+    });
+    reply.type("image/png").send(data);
   });
 }

@@ -72,8 +72,8 @@ describe("checkSharedRows", () => {
     const run = await prisma.extractionRun.create({
       data: { submissionId: submission.id, extractorVersion: "test", model: "test", status: "succeeded" },
     });
-    for (const rowKey of rowKeys) {
-      await prisma.transactionRow.create({ data: { extractionRunId: run.id, rowKey } });
+    for (const [sequence, rowKey] of rowKeys.entries()) {
+      await prisma.transactionRow.create({ data: { extractionRunId: run.id, sequence, rowKey } });
     }
     return { participant: p, enrollment, run };
   }

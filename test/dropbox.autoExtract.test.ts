@@ -1,22 +1,9 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { promisify } from "node:util";
 import { buildTestContext, resetDb, INTAKE_ROOT } from "./helpers/testApp.js";
-
-const execFileAsync = promisify(execFile);
+import { makeScrollVideo } from "./helpers/scrollVideo.js";
 
 async function makeTestVideo(): Promise<Buffer> {
-  const dir = await mkdtemp(join(tmpdir(), "betlab-autoextract-"));
-  try {
-    const outPath = join(dir, "out.mp4");
-    await execFileAsync("ffmpeg", ["-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=5:duration=2", outPath]);
-    return await readFile(outPath);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
+  return (await makeScrollVideo({ rowCount: 6, speed: 400 })).buffer;
 }
 
 describe("Dropbox ingest auto-triggers extraction end to end", () => {
@@ -25,8 +12,8 @@ describe("Dropbox ingest auto-triggers extraction end to end", () => {
   beforeAll(async () => {
     ctx = await buildTestContext({
       autoExtractOnIngest: true,
-      visionScript: (frame) => [
-        { timestamp: `2026-09-15T12:0${frame.index}:00Z`, type: "bet", amount: 10, balanceAfter: null, confidence: 0.9 },
+      visionScript: (tile) => [
+        { timestamp: "2026-09-15T12:00:00Z", type: "bet", description: null, amount: 10, balanceBefore: null, balanceAfter: null, confidence: 0.9, fullyVisible: true, yTop: (tile.top + 20) / tile.scale },
       ],
     });
   });

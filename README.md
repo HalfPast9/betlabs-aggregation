@@ -6,12 +6,15 @@ milestones (M0–M4) are implemented:
 - **M0 — Archive**: Dropbox File Request ingest → immutable, content-addressed, searchable store.
 - **M1 — Enrollment lifecycle & email verification**: full state machine with hash-chained decision
   log, inbound-email intake with real DKIM verification, pre-funding checks, funding/wager queues.
-- **M2 — Wager extraction**: ffmpeg frame sampling + perceptual-hash dedup, a vision-model row
-  reader, stitching, deterministic validation, reconciliation against the grant, cost instrumentation.
+- **M2 — Wager extraction**: scroll reconstruction (the recording is stitched into one image of
+  the whole list, cut on row boundaries), a vision-model row reader, balance-chain verification
+  that makes completeness measurable, reconciliation against the grant, cost instrumentation.
+  Measured at 100% row recall/precision on a real recording (`docs/extraction-benchmark.md`).
 - **M3 — Remaining integrity signals**: encoder/keyframe checks, cross-submission duplicate-media
   and shared-row detection, submission-gap and manual-intake flags.
-- **M4 — Console & hardening**: a review console (side-by-side evidence + extracted rows, click a
-  row to seek), CSV exports, per-staff RBAC (ops/admin), audit log, a real retention job.
+- **M4 — Console & hardening**: a review console (stitched list or recording beside the extracted
+  rows, click a row to highlight it in place), CSV exports, per-staff RBAC (ops/admin), audit log,
+  a real retention job.
 
 ## Status of external dependencies
 
@@ -121,7 +124,14 @@ non-terminal state)
   language, a forwarded email is matched to an enrollment by the outer message's `From:` against
   the participant's registered email, among their enrollments still awaiting one. If that's
   ambiguous (zero or multiple candidates), it's logged as an unmatched `AuditEvent` rather than
-  guessed at — a known v1 limitation, not a silent failure.
+  guessed at — a known v1 limitation, not a silent failure. This only covers the case where the
+  *participant* does the forwarding themselves; if a runner relays the email on the participant's
+  behalf instead (the same "manual paste by runner" pattern D8 already assumes for Dropbox links),
+  the sender won't match. That path exists too: `POST /submissions/manual` with
+  `kind=signup_email` runs the identical real DKIM verification and tiering
+  (`email/verifyEmailEvidence.ts`, shared by both paths) — a runner-relayed `.eml` gets exactly
+  the same evidential weight as a self-forwarded one, just explicitly tied to an enrollment
+  instead of inferred from the sender.
 - **The retention job never deletes a row** — only the raw bytes in the object store
   (`mediaAsset.deletedAt` marks it). Submissions, extracted rows, integrity flags, and the decision
   log are permanent, matching §9's "the structured data is the product; the raw video is the

@@ -38,11 +38,17 @@ const envSchema = z.object({
 
   VISION_MODE: z.enum(["fake", "claude"]).default("fake"),
   ANTHROPIC_API_KEY: z.string().optional(),
+  // Sonnet 5 by default: the pipeline reads each row exactly once off a
+  // stitched panorama, so the per-video cost is driven by row count, not
+  // frames — a few cents even on Sonnet — and read accuracy is what the
+  // whole system hinges on. See docs/extraction-benchmark.md for how to
+  // evaluate a cheaper/optimized model against this one.
   CLAUDE_VISION_MODEL: z.string().default("claude-sonnet-5"),
 
   EXTRACTOR_VERSION: z.string().default("v1"),
-  FRAME_INTERVAL_SECONDS: z.coerce.number().default(1.5),
-  DEDUP_HAMMING_THRESHOLD: z.coerce.number().default(4),
+  // Decode rate for scroll reconstruction. Denser sampling keeps consecutive
+  // frames overlapping through fast flicks; cost is local CPU only.
+  PANORAMA_FPS: z.coerce.number().default(10),
   AUTO_EXTRACT_ON_INGEST: z.coerce.boolean().default(true),
 });
 

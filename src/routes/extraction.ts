@@ -17,8 +17,7 @@ export async function registerExtractionRoutes(app: FastifyInstance, opts: { dep
           objectStore: deps.objectStore,
           visionExtractor: deps.visionExtractor,
           extractorVersion: deps.extractorVersion,
-          frameIntervalSeconds: deps.frameIntervalSeconds,
-          dedupHammingThreshold: deps.dedupHammingThreshold,
+          panoramaFps: deps.panoramaFps,
         },
         request.params.id,
       );
@@ -31,7 +30,7 @@ export async function registerExtractionRoutes(app: FastifyInstance, opts: { dep
   app.get<{ Params: { id: string } }>("/submissions/:id/extraction-runs", async (request, reply) => {
     const runs = await deps.prisma.extractionRun.findMany({
       where: { submissionId: request.params.id },
-      include: { rows: { orderBy: { sourceFrameTs: "asc" } }, reconciliation: true },
+      include: { rows: { orderBy: { sequence: "asc" } }, reconciliation: true },
       orderBy: { startedAt: "desc" },
     });
     reply.send(runs);

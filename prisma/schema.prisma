@@ -130,8 +130,19 @@ model ExtractionRun {
   outputTokens     Int?
   costUsd          Decimal?  @db.Decimal(10, 4)
   error            String?
+  // Scroll reconstruction (extraction/panorama.ts): how many frames were
+  // aligned, how many tiles the model read, and where the stitched image
+  // lives in the object store (for the review console).
+  frameCount       Int?
+  tileCount        Int?
+  panoramaBlobKey  String?
+  // The model's raw per-tile output, before assembly/verification — lets
+  // assembly be re-run offline and read quality be scored without paying
+  // for the model again.
+  tileReads        Json?
   rows             TransactionRow[]
   reconciliation   Reconciliation?
+  integrityFlags   IntegrityFlag[]
 
   @@index([submissionId])
   @@map("extraction_run")
@@ -141,16 +152,44 @@ model TransactionRow {
   id              String        @id @default(uuid())
   extractionRunId String
   extractionRun   ExtractionRun @relation(fields: [extractionRunId], references: [id])
+  // Display order, top of the list first. Row identity is *position* in the
+  // reconstructed list — two distinct transactions can legitimately have
+  // identical content (same minute, same game, same amount, same balances).
+  sequence        Int
+  // Content hash (timestamp|type|amount|before|after); not unique — used
+  // only for cross-participant SHARED_ROWS matching.
   rowKey          String
   timestamp       DateTime?
+  // Constrained vocabulary (bet | win | deposit | withdrawal | bonus |
+  // refund | other) — free-form UI wording (game name, counterparty, etc.)
+  // goes in `description` instead, so it never pollutes reconciliation.
   type            String?
+  description     String?
   amount          Decimal?      @db.Decimal(14, 2)
+  // Not every UI shows both; when a row shows only a single running
+  // balance, that goes in balanceAfter and balanceBefore stays null.
+  balanceBefore   Decimal?      @db.Decimal(14, 2)
   balanceAfter    Decimal?      @db.Decimal(14, 2)
   sourceFrameTs   Float?
   confidence      Float?
+  // Normalized (0-1, top-left origin) location of this row within its source
+  // frame, as estimated by the vision model — powers click-a-row →
+  // highlight-on-video in the console. Null on rows read before this field
+  // existed, or when the model didn't return one.
+  boxX            Float?
+  boxY            Float?
+  boxW            Float?
+  boxH            Float?
+  // Where the row sits in the stitched panorama (full-res px, per segment).
+  segmentIndex    Int?
+  panoramaTop     Float?
+  panoramaBottom  Float?
+  // No tile had the whole row — the recording started or ended mid-row.
+  partial         Boolean       @default(false)
 
-  @@unique([extractionRunId, rowKey])
+  @@unique([extractionRunId, sequence])
   @@index([extractionRunId])
+  @@index([rowKey])
   @@map("transaction_row")
 }
 
@@ -162,6 +201,14 @@ model Reconciliation {
   grantedAmount   Decimal?      @db.Decimal(14, 2)
   delta           Decimal?      @db.Decimal(14, 2)
   arithmeticOk    Boolean
+  // Balance-chain verification (extraction/chain.ts): did every row's
+  // before-balance match the previous row's after-balance? This is what
+  // makes completeness a measured fact rather than a hope.
+  chainComplete   Boolean?
+  chainBreaks     Json?
+  chainStart      Decimal?      @db.Decimal(14, 2)
+  chainEnd        Decimal?      @db.Decimal(14, 2)
+  newestFirst     Boolean?
   createdAt       DateTime      @default(now())
 
   @@map("reconciliation")
@@ -170,9 +217,18 @@ model Reconciliation {
 // PRD §7 — deterministic, post-extraction checks. Each row is an annotation,
 // never a verdict (§4 non-goals).
 model IntegrityFlag {
-  id           String     @id @default(uuid())
+  id           String         @id @default(uuid())
   submissionId String
-  submission   Submission @relation(fields: [submissionId], references: [id])
+  submission   Submission     @relation(fields: [submissionId], references: [id])
+  // Set only for flags computed during extraction (arithmetic/timestamp/
+  // shortfall/confidence/encoder/duplicate/shared-rows checks) — these
+  // represent current analysis, not a historical record, so re-running
+  // extraction replaces them (see runExtraction.ts). Null for flags that
+  // don't change on re-extraction (MANUAL_INTAKE, OUT_OF_SEQUENCE), which
+  // are never cleared this way. A decision's evidenceSnapshot still freezes
+  // whatever flags existed at that moment, independent of this table.
+  extractionRunId String?
+  extractionRun   ExtractionRun? @relation(fields: [extractionRunId], references: [id])
   code         String
   severity     String     // info | warning | high
   detail       String?
@@ -181,6 +237,7 @@ model IntegrityFlag {
 
   @@index([submissionId])
   @@index([code])
+  @@index([extractionRunId])
   @@map("integrity_flag")
 }
 

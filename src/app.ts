@@ -38,8 +38,7 @@ export interface AppDeps {
   inboundEmailToken?: string;
   dkimResolver?: DNSResolver;
   extractorVersion: string;
-  frameIntervalSeconds: number;
-  dedupHammingThreshold: number;
+  panoramaFps: number;
   autoExtractOnIngest: boolean;
   dropboxQuotaWarningThreshold: number;
   logger?: boolean;

@@ -1,41 +1,51 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { PrismaClient } from "@prisma/client";
-import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { promisify } from "node:util";
 import { runExtraction } from "../src/extraction/runExtraction.js";
 import { FakeVisionExtractor } from "../src/extraction/fakeVisionExtractor.js";
+import type { RawExtractedRow, TileInput } from "../src/extraction/visionExtractor.js";
 import { sha256Hex } from "../src/lib/hash.js";
 import { createTmpObjectStore } from "./helpers/tmpObjectStore.js";
 import { resetDb } from "./helpers/testApp.js";
+import { makeScrollVideo } from "./helpers/scrollVideo.js";
 
-const execFileAsync = promisify(execFile);
+const ROW_H = 90;
 
-async function makeTestVideo(durationSeconds: number): Promise<Buffer> {
-  const dir = await mkdtemp(join(tmpdir(), "betlab-testvideo-"));
-  try {
-    const outPath = join(dir, "out.mp4");
-    await execFileAsync("ffmpeg", [
-      "-y",
-      "-f",
-      "lavfi",
-      "-i",
-      `testsrc=size=320x240:rate=5:duration=${durationSeconds}`,
-      outPath,
-    ]);
-    return await readFile(outPath);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
+function row(overrides: Partial<RawExtractedRow>): RawExtractedRow {
+  return {
+    timestamp: null,
+    type: "bet",
+    description: null,
+    amount: -1,
+    balanceBefore: null,
+    balanceAfter: null,
+    confidence: 0.9,
+    fullyVisible: true,
+    yTop: null,
+    ...overrides,
+  };
+}
+
+/**
+ * A scripted reader that "sees" a fixed list of rows laid out at ROW_H px
+ * pitch in the panorama, and returns whichever ones fall inside each tile —
+ * exactly what a real read of a correctly stitched panorama produces,
+ * including the same row appearing in two overlapping tiles.
+ */
+function listReader(list: Array<Partial<RawExtractedRow>>) {
+  return (tile: TileInput): RawExtractedRow[] =>
+    list
+      .map((r, i) => ({ r, top: i * ROW_H + 10 }))
+      .filter(({ top }) => top >= tile.top && top + ROW_H * 0.8 <= tile.bottom)
+      .map(({ r, top }) => row({ ...r, yTop: top / tile.scale }));
 }
 
 describe("runExtraction", () => {
   const prisma = new PrismaClient();
+  let video: Buffer;
 
   beforeAll(async () => {
     await resetDb(prisma);
+    video = (await makeScrollVideo({ rowCount: 24, speed: 400 })).buffer;
   });
   afterEach(async () => {
     await resetDb(prisma);
@@ -50,83 +60,124 @@ describe("runExtraction", () => {
       data: { participantId: participant.id, casino: "AcmeCasino", state: "funded" },
     });
     if (grantAmount !== undefined) {
-      await prisma.grant.create({
-        data: { enrollmentId: enrollment.id, amount: grantAmount, sentAt: new Date() },
-      });
+      await prisma.grant.create({ data: { enrollmentId: enrollment.id, amount: grantAmount, sentAt: new Date() } });
     }
     const contentHash = sha256Hex(videoBuffer);
-    const mediaAsset = await prisma.mediaAsset.create({
-      data: { blobKey: contentHash, contentHash, bytes: videoBuffer.byteLength },
-    });
+    const mediaAsset = await prisma.mediaAsset.create({ data: { blobKey: contentHash, contentHash, bytes: videoBuffer.byteLength } });
     const submission = await prisma.submission.create({
       data: { enrollmentId: enrollment.id, kind: "wager_recording", channel: "dropbox", mediaAssetId: mediaAsset.id, contentHash },
     });
     return { participant, enrollment, submission, contentHash };
   }
 
-  it("samples frames, stitches rows, and persists a reconciliation", async () => {
-    const video = await makeTestVideo(4);
-    const { store: objectStore, cleanup } = await createTmpObjectStore();
+  const deps = (objectStore: Awaited<ReturnType<typeof createTmpObjectStore>>["store"], visionExtractor: FakeVisionExtractor, version = "test") => ({
+    prisma,
+    objectStore,
+    visionExtractor,
+    extractorVersion: version,
+    panoramaFps: 10,
+  });
 
+  // A newest-first list whose balance chain is intact: 100 → 99 → 101 → 100 → …
+  const intactList: Array<Partial<RawExtractedRow>> = [
+    { timestamp: "2026-09-15 12:05", type: "win", amount: 2, balanceBefore: 99, balanceAfter: 101 },
+    { timestamp: "2026-09-15 12:04", type: "bet", amount: -1, balanceBefore: 100, balanceAfter: 99 },
+    { timestamp: "2026-09-15 12:03", type: "bet", amount: -1, balanceBefore: 101, balanceAfter: 100 },
+    { timestamp: "2026-09-15 12:02", type: "win", amount: 2, balanceBefore: 99, balanceAfter: 101 },
+    { timestamp: "2026-09-15 12:01", type: "bet", amount: -1, balanceBefore: 100, balanceAfter: 99 },
+    { timestamp: "2026-09-15 12:00", type: "deposit", amount: 100, balanceBefore: 0, balanceAfter: 100 },
+  ];
+
+  it("reconstructs the scroll, reads tiles, and persists rows with a verified chain", async () => {
+    const { store: objectStore, cleanup } = await createTmpObjectStore();
     try {
-      const { submission } = await makeFundedSubmission(video, 100);
+      const { submission } = await makeFundedSubmission(video, 3);
       await objectStore.put(submission.contentHash, video);
 
-      const visionExtractor = new FakeVisionExtractor((frame) => [
-        {
-          timestamp: new Date(2026, 8, 15, 12, frame.index).toISOString(),
-          type: "bet",
-          amount: 10,
-          balanceAfter: 100 - frame.index * 10,
-          confidence: 0.9,
-        },
-      ]);
+      const result = await runExtraction(deps(objectStore, new FakeVisionExtractor(listReader(intactList))), submission.id);
 
-      const result = await runExtraction(
-        {
-          prisma,
-          objectStore,
-          visionExtractor,
-          extractorVersion: "test",
-          frameIntervalSeconds: 1,
-          dedupHammingThreshold: 0,
-        },
-        submission.id,
-      );
-
-      expect(result.rowCount).toBeGreaterThan(0);
+      expect(result.rowCount).toBe(intactList.length);
+      expect(result.chainComplete).toBe(true);
 
       const run = await prisma.extractionRun.findUniqueOrThrow({
         where: { id: result.extractionRunId },
-        include: { rows: true, reconciliation: true },
+        include: { rows: { orderBy: { sequence: "asc" } }, reconciliation: true },
       });
       expect(run.status).toBe("succeeded");
-      expect(run.rows.length).toBe(result.rowCount);
-      expect(run.reconciliation).not.toBeNull();
-      expect(Number(run.reconciliation!.wageredTotal)).toBeGreaterThan(0);
-      expect(Number(run.reconciliation!.grantedAmount)).toBe(100);
+      expect(run.frameCount).toBeGreaterThan(10);
+      expect(run.tileCount).toBeGreaterThanOrEqual(1);
+      expect(run.panoramaBlobKey).toBeTruthy();
+      expect((await objectStore.get(run.panoramaBlobKey!)).byteLength).toBeGreaterThan(1000);
+
+      expect(run.rows.map((r) => r.type)).toEqual(["win", "bet", "bet", "win", "bet", "deposit"]);
+      expect(run.rows.every((r) => r.sourceFrameTs !== null && r.boxY !== null)).toBe(true);
+      expect(run.reconciliation!.chainComplete).toBe(true);
+      expect(run.reconciliation!.newestFirst).toBe(true);
+      expect(Number(run.reconciliation!.chainStart)).toBe(0);
+      expect(Number(run.reconciliation!.chainEnd)).toBe(101);
+      expect(Number(run.reconciliation!.wageredTotal)).toBe(3);
+      expect(Number(run.reconciliation!.grantedAmount)).toBe(3);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("merges the same row read from two overlapping tiles by position, not content", async () => {
+    const { store: objectStore, cleanup } = await createTmpObjectStore();
+    try {
+      const { submission } = await makeFundedSubmission(video);
+      await objectStore.put(submission.contentHash, video);
+
+      // 20 rows at 90px pitch = 1800px of list → two tiles with a 320px overlap
+      // (tile 0: 0-1400, tile 1: 1080-2160). Several rows straddle both. Rows
+      // alternate bet/win under one displayed minute so every other row is
+      // content-identical — like a real same-minute run, and unlike the same
+      // row read twice.
+      const identical = Array.from({ length: 20 }, (_, i) => ({
+        timestamp: "2026-09-15 12:00",
+        type: i % 2 === 0 ? ("bet" as const) : ("win" as const),
+        amount: i % 2 === 0 ? -1 : 1,
+        balanceBefore: i % 2 === 0 ? 100 : 99,
+        balanceAfter: i % 2 === 0 ? 99 : 100,
+        description: `row ${i}`,
+      }));
+      const extractor = new FakeVisionExtractor(listReader(identical));
+      const result = await runExtraction(deps(objectStore, extractor), submission.id);
+
+      // Content-identical rows stay distinct; overlap reads collapse.
+      expect(result.rowCount).toBe(20);
+      const run = await prisma.extractionRun.findUniqueOrThrow({ where: { id: result.extractionRunId } });
+      expect(run.tileCount).toBe(2);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("flags EXTRACTION_INCOMPLETE when the balance chain has a break, and not when it doesn't", async () => {
+    const { store: objectStore, cleanup } = await createTmpObjectStore();
+    try {
+      const { submission } = await makeFundedSubmission(video);
+      await objectStore.put(submission.contentHash, video);
+
+      const withGap = intactList.filter((_, i) => i !== 2); // drop the 101→100 row
+      await runExtraction(deps(objectStore, new FakeVisionExtractor(listReader(withGap))), submission.id);
+      let flags = await prisma.integrityFlag.findMany({ where: { submissionId: submission.id } });
+      expect(flags.some((f) => f.code === "EXTRACTION_INCOMPLETE")).toBe(true);
+
+      await runExtraction(deps(objectStore, new FakeVisionExtractor(listReader(intactList)), "v2"), submission.id);
+      flags = await prisma.integrityFlag.findMany({ where: { submissionId: submission.id } });
+      expect(flags.some((f) => f.code === "EXTRACTION_INCOMPLETE")).toBe(false);
     } finally {
       await cleanup();
     }
   });
 
   it("flags WAGER_SHORTFALL when wagered total is under the granted amount", async () => {
-    const video = await makeTestVideo(2);
     const { store: objectStore, cleanup } = await createTmpObjectStore();
-
     try {
       const { submission } = await makeFundedSubmission(video, 1000);
       await objectStore.put(submission.contentHash, video);
-
-      const visionExtractor = new FakeVisionExtractor((frame) => [
-        { timestamp: `2026-09-15T12:0${frame.index}:00Z`, type: "bet", amount: 5, balanceAfter: null, confidence: 0.9 },
-      ]);
-
-      await runExtraction(
-        { prisma, objectStore, visionExtractor, extractorVersion: "test", frameIntervalSeconds: 1, dedupHammingThreshold: 0 },
-        submission.id,
-      );
-
+      await runExtraction(deps(objectStore, new FakeVisionExtractor(listReader(intactList))), submission.id);
       const flags = await prisma.integrityFlag.findMany({ where: { submissionId: submission.id } });
       expect(flags.some((f) => f.code === "WAGER_SHORTFALL")).toBe(true);
     } finally {
@@ -134,33 +185,13 @@ describe("runExtraction", () => {
     }
   });
 
-  it("flags ARITHMETIC_MISMATCH when balance doesn't reconcile with the row amount", async () => {
-    const video = await makeTestVideo(2);
+  it("flags ARITHMETIC_MISMATCH when a row's own balances don't move by its amount", async () => {
     const { store: objectStore, cleanup } = await createTmpObjectStore();
-
     try {
       const { submission } = await makeFundedSubmission(video);
       await objectStore.put(submission.contentHash, video);
-
-      let call = 0;
-      const visionExtractor = new FakeVisionExtractor((frame) => {
-        call++;
-        return [
-          {
-            timestamp: `2026-09-15T12:0${frame.index}:00Z`,
-            type: "bet",
-            amount: 10,
-            balanceAfter: call === 1 ? 100 : 50, // second row's balance doesn't match a 10-unit move
-            confidence: 0.9,
-          },
-        ];
-      });
-
-      await runExtraction(
-        { prisma, objectStore, visionExtractor, extractorVersion: "test", frameIntervalSeconds: 1, dedupHammingThreshold: 0 },
-        submission.id,
-      );
-
+      const bad = [{ timestamp: "2026-09-15 12:00", type: "bet" as const, amount: -10, balanceBefore: 100, balanceAfter: 50 }];
+      await runExtraction(deps(objectStore, new FakeVisionExtractor(listReader(bad))), submission.id);
       const flags = await prisma.integrityFlag.findMany({ where: { submissionId: submission.id } });
       expect(flags.some((f) => f.code === "ARITHMETIC_MISMATCH")).toBe(true);
     } finally {
@@ -168,48 +199,43 @@ describe("runExtraction", () => {
     }
   });
 
-  it("dedupes rows read identically across multiple sampled frames", async () => {
-    const video = await makeTestVideo(3);
+  it("marks the run failed when the object store can't find the media", async () => {
     const { store: objectStore, cleanup } = await createTmpObjectStore();
-
     try {
       const { submission } = await makeFundedSubmission(video);
-      await objectStore.put(submission.contentHash, video);
-
-      // Every frame "reads" the exact same single row — like a static screen sampled multiple times.
-      const visionExtractor = new FakeVisionExtractor(() => [
-        { timestamp: "2026-09-15T12:00:00Z", type: "bet", amount: 10, balanceAfter: 90, confidence: 0.9 },
-      ]);
-
-      const result = await runExtraction(
-        { prisma, objectStore, visionExtractor, extractorVersion: "test", frameIntervalSeconds: 1, dedupHammingThreshold: 0 },
-        submission.id,
-      );
-
-      expect(result.rowCount).toBe(1);
+      await expect(runExtraction(deps(objectStore, new FakeVisionExtractor()), submission.id)).rejects.toThrow();
+      const run = await prisma.extractionRun.findFirstOrThrow({ where: { submissionId: submission.id } });
+      expect(run.status).toBe("failed");
+      expect(run.error).toBeTruthy();
     } finally {
       await cleanup();
     }
   });
 
-  it("marks the run failed when the object store can't find the media", async () => {
-    const video = await makeTestVideo(1);
+  it("replaces stale extraction-derived flags on re-run, but leaves ingest-time flags alone", async () => {
     const { store: objectStore, cleanup } = await createTmpObjectStore();
     try {
       const { submission } = await makeFundedSubmission(video);
-      // Deliberately never put the bytes into the object store.
-      const visionExtractor = new FakeVisionExtractor();
+      await objectStore.put(submission.contentHash, video);
 
-      await expect(
-        runExtraction(
-          { prisma, objectStore, visionExtractor, extractorVersion: "test", frameIntervalSeconds: 1, dedupHammingThreshold: 0 },
-          submission.id,
-        ),
-      ).rejects.toThrow();
+      await prisma.integrityFlag.create({
+        data: { submissionId: submission.id, code: "MANUAL_INTAKE", severity: "info", detail: "test fixture", generatedBy: "test" },
+      });
 
-      const run = await prisma.extractionRun.findFirstOrThrow({ where: { submissionId: submission.id } });
-      expect(run.status).toBe("failed");
-      expect(run.error).toBeTruthy();
+      const broken = [{ timestamp: "2026-09-15 12:00", type: "bet" as const, amount: -10, balanceBefore: 100, balanceAfter: 50 }];
+      await runExtraction(deps(objectStore, new FakeVisionExtractor(listReader(broken)), "v1"), submission.id);
+      const afterFirstRun = await prisma.integrityFlag.findMany({ where: { submissionId: submission.id } });
+      expect(afterFirstRun.some((f) => f.code === "ARITHMETIC_MISMATCH")).toBe(true);
+      expect(afterFirstRun.some((f) => f.code === "MANUAL_INTAKE")).toBe(true);
+
+      const fixed = [{ timestamp: "2026-09-15 12:00", type: "bet" as const, amount: -10, balanceBefore: 100, balanceAfter: 90 }];
+      await runExtraction(deps(objectStore, new FakeVisionExtractor(listReader(fixed)), "v2"), submission.id);
+      const afterSecondRun = await prisma.integrityFlag.findMany({ where: { submissionId: submission.id } });
+      expect(afterSecondRun.some((f) => f.code === "ARITHMETIC_MISMATCH")).toBe(false);
+      expect(afterSecondRun.filter((f) => f.code === "MANUAL_INTAKE")).toHaveLength(1);
+
+      const runs = await prisma.extractionRun.findMany({ where: { submissionId: submission.id } });
+      expect(runs).toHaveLength(2);
     } finally {
       await cleanup();
     }

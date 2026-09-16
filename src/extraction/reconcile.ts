@@ -1,10 +1,4 @@
-import type { StitchedRow } from "./stitch.js";
-import type { ExtractionFlag } from "./validate.js";
-
-// Casino UIs describe transaction types with free text we don't control
-// (§6.3's whole rationale for a generalist reader over per-casino parsers),
-// so "was this a wager" is a substring heuristic, not a fixed enum match.
-const WAGER_TYPE_HINTS = ["bet", "wager", "stake"];
+import type { ExtractionFlag, ValidatableRow } from "./validate.js";
 
 export interface ReconciliationResult {
   wageredTotal: number;
@@ -16,12 +10,15 @@ export interface ReconciliationResult {
 
 /** PRD §6.3 step 4 / §7 WAGER_SHORTFALL — reconcile wagering activity against the amount granted. */
 export function reconcile(
-  rows: StitchedRow[],
+  rows: ValidatableRow[],
   grantedAmount: number | null,
   arithmeticFlags: ExtractionFlag[],
 ): ReconciliationResult {
+  // `type` is now a constrained vocabulary the extractor normalizes to
+  // (visionExtractor.ts's TransactionType) regardless of how a given UI
+  // words it — an exact match here, not a substring guess.
   const wageredTotal = rows
-    .filter((r) => r.type && WAGER_TYPE_HINTS.some((hint) => r.type!.toLowerCase().includes(hint)))
+    .filter((r) => r.type === "bet")
     .reduce((sum, r) => sum + Math.abs(r.amount ?? 0), 0);
 
   return {

@@ -3,7 +3,7 @@ import type { DNSResolver } from "mailauth";
 import { buildApp } from "../../src/app.js";
 import { FakeDropboxClient } from "../../src/dropbox/fakeClient.js";
 import { FakeEmailSender } from "../../src/email/sender.js";
-import { FakeVisionExtractor, type FrameScript } from "../../src/extraction/fakeVisionExtractor.js";
+import { FakeVisionExtractor, type TileScript } from "../../src/extraction/fakeVisionExtractor.js";
 import { ensureBootstrapAdmin } from "../../src/lib/auth.js";
 import { createTmpObjectStore } from "./tmpObjectStore.js";
 
@@ -11,7 +11,7 @@ export const STAFF_TOKEN = "test-token";
 export const INTAKE_ROOT = "/betlab-intake";
 
 export interface BuildTestContextOptions {
-  visionScript?: FrameScript;
+  visionScript?: TileScript;
   dkimResolver?: DNSResolver;
   autoExtractOnIngest?: boolean;
   inboundEmailToken?: string;
@@ -35,8 +35,7 @@ export async function buildTestContext(opts: BuildTestContextOptions = {}) {
     dkimResolver: opts.dkimResolver,
     inboundEmailToken: opts.inboundEmailToken,
     extractorVersion: "test",
-    frameIntervalSeconds: 1,
-    dedupHammingThreshold: 4,
+    panoramaFps: 10,
     autoExtractOnIngest: opts.autoExtractOnIngest ?? true,
     dropboxQuotaWarningThreshold: 0.9,
     logger: false,

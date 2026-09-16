@@ -33,7 +33,7 @@ export class RealDropboxClient implements DropboxClient {
 
   async listFolder(folderPath: string, cursor?: string): Promise<ListFolderPage> {
     const res = cursor
-      ? await this.dbx.filesListFolderContinue({ cursor })
+      ? await this.continueOrRecover(folderPath, cursor)
       : await this.dbx.filesListFolder({ path: folderPath, recursive: true });
 
     const entries: DropboxFileEntry[] = res.result.entries
@@ -45,6 +45,24 @@ export class RealDropboxClient implements DropboxClient {
       }));
 
     return { entries, cursor: res.result.cursor, hasMore: res.result.has_more };
+  }
+
+  /**
+   * A stored cursor can go bad for reasons outside our control — Dropbox
+   * documents that cursors can be invalidated (`reset`), and in practice any
+   * malformed value (a corrupted DB row, or here, a mode switch that left a
+   * cursor from a different Dropbox client behind) gets a plain 400 rather
+   * than a typed error. Recovering by falling back to a fresh list_folder,
+   * rather than failing forever, is what actually matters in production —
+   * a permanently stuck sync loop is worse than reprocessing one page.
+   */
+  private async continueOrRecover(folderPath: string, cursor: string) {
+    try {
+      return await this.dbx.filesListFolderContinue({ cursor });
+    } catch (err) {
+      console.error(`Dropbox cursor invalid, resetting and re-listing ${folderPath}:`, err);
+      return this.dbx.filesListFolder({ path: folderPath, recursive: true });
+    }
   }
 
   async download(pathLower: string): Promise<Buffer> {

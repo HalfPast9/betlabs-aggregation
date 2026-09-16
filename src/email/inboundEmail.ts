@@ -1,10 +1,11 @@
 import type { PrismaClient } from "@prisma/client";
 import type { DNSResolver } from "mailauth";
-import { parseInboundEmail, parseOriginalHeaders } from "./parseMime.js";
-import { verifyDkim } from "./dkim.js";
-import { tierForAttachedOriginal, tierForNoAttachment } from "./tier.js";
+import { parseInboundEmail } from "./parseMime.js";
+import { tierForNoAttachment } from "./tier.js";
+import { verifyEmailEvidence } from "./verifyEmailEvidence.js";
 import { buildAutoReplyMessage, type EmailSender } from "./sender.js";
 import { recordTransition } from "../enrollment/decisions.js";
+import { handleEmailEvidenceSubmitted } from "../enrollment/emailEvidenceIngested.js";
 import { sha256Hex } from "../lib/hash.js";
 import type { ObjectStore } from "../storage/objectStore.js";
 
@@ -94,19 +95,7 @@ export async function handleInboundEmail(
     return { status: "duplicate", enrollmentId: enrollment.id };
   }
 
-  const dkim = await verifyDkim(outer.attachedOriginal, dkimResolver);
-  const original = await parseOriginalHeaders(outer.attachedOriginal);
-
-  const allowedSigner = dkim.dDomain
-    ? await prisma.dkimAllowedSigner.findFirst({
-        where: { casino: enrollment.casino, domain: dkim.dDomain },
-      })
-    : null;
-  const tier = tierForAttachedOriginal({
-    dkimResult: dkim.result,
-    hTagCoversTo: dkim.hTagCoversTo,
-    signerAllowlisted: !!allowedSigner,
-  });
+  const evidence = await verifyEmailEvidence(prisma, enrollment.casino, outer.attachedOriginal, dkimResolver);
 
   await objectStore.put(contentHash, outer.attachedOriginal);
 
@@ -129,40 +118,13 @@ export async function handleInboundEmail(
       },
     });
     await tx.emailEvidence.create({
-      data: {
-        submissionId: submission.id,
-        tier,
-        dkimResult: dkim.result,
-        selector: dkim.selector,
-        dDomain: dkim.dDomain,
-        publicKeyUsed: dkim.publicKeyUsed,
-        verifiedAt: new Date(),
-        hTagCoversTo: dkim.hTagCoversTo,
-        lTagPresent: dkim.lTagPresent,
-        fromAddr: original.fromAddr,
-        toAddr: original.toAddr,
-        subject: original.subject,
-        sentAt: original.date,
-      },
+      data: { submissionId: submission.id, verifiedAt: new Date(), ...evidence },
     });
 
-    if (enrollment.state === "invited") {
-      await recordTransition(tx, {
-        enrollmentId: enrollment.id,
-        toState: "email_submitted",
-        actor: "system",
-        note: "Inbound email received with an attached original",
-      });
-    }
-    await recordTransition(tx, {
-      enrollmentId: enrollment.id,
-      toState: "email_verified",
-      actor: "system",
-      note: `DKIM verification ran: ${dkim.result} (tier ${tier})`,
-    });
+    await handleEmailEvidenceSubmitted(tx, enrollment, evidence.dkimResult, evidence.tier);
   });
 
-  return { status: "verified", enrollmentId: enrollment.id, tier, dkimResult: dkim.result };
+  return { status: "verified", enrollmentId: enrollment.id, tier: evidence.tier, dkimResult: evidence.dkimResult };
 }
 
 async function logUnmatched(prisma: PrismaClient, reason: string, fromAddr: string): Promise<void> {

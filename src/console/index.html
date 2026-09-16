@@ -39,7 +39,20 @@
   .badge.info { background: rgba(79,140,255,.2); color: #8fb6ff; }
   .muted { color: var(--muted); }
   .review-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-  video { width: 100%; background: #000; border-radius: 8px; }
+  video { width: 100%; background: #000; border-radius: 8px; display: block; }
+  .video-wrap { position: relative; }
+  .row-highlight {
+    position: absolute; border: 2px solid var(--accent); background: rgba(79,140,255,.18);
+    border-radius: 3px; pointer-events: none; opacity: 0; transition: opacity .15s ease;
+  }
+  .row-highlight.show { opacity: 1; }
+  .evidence-tabs { display: flex; gap: 4px; margin-bottom: 8px; }
+  .evidence-tabs button.active { background: var(--accent); border-color: var(--accent); color: white; }
+  .pano-wrap { position: relative; max-height: 560px; overflow: auto; background: #000; border-radius: 8px; }
+  .pano-wrap img { width: 100%; display: block; }
+  .pano-highlight { position: absolute; left: 0; width: 100%; border: 2px solid var(--accent); background: rgba(79,140,255,.18); pointer-events: none; opacity: 0; transition: opacity .15s ease; }
+  .pano-highlight.show { opacity: 1; }
+  tr.partial td { opacity: .6; }
   .rowlist { max-height: 480px; overflow: auto; }
   .rowlist tr { cursor: pointer; }
   .rowlist tr.active td { background: rgba(79,140,255,.15); }
@@ -88,6 +101,14 @@ function logout() {
 
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 function fmtDate(d) { return d ? new Date(d).toLocaleString() : ""; }
+function chainSummary(rec) {
+  if (rec.chainComplete == null) return '<span class="muted">· balance chain not checkable</span>';
+  if (rec.chainComplete) {
+    return `· balance chain <span class="ok-text">complete</span> (${Number(rec.chainStart).toFixed(2)} → ${Number(rec.chainEnd).toFixed(2)}, ${rec.newestFirst ? "newest first" : "oldest first"})`;
+  }
+  const n = Array.isArray(rec.chainBreaks) ? rec.chainBreaks.length : "?";
+  return `· balance chain <span class="error">${n} break${n === 1 ? "" : "s"}</span> — rows may be missing or misread`;
+}
 function flagBadges(flags) {
   if (!flags || !flags.length) return '<span class="muted small">none</span>';
   return flags.map((f) => `<span class="badge ${esc(f.severity)}" title="${esc(f.detail || "")}">${esc(f.code)}</span>`).join(" ");
@@ -248,36 +269,54 @@ async function viewSubmission(root, id) {
     <div class="review-grid">
       <div class="panel">
         <h3>Raw evidence</h3>
-        ${s.mediaAsset.deletedAt ? '<p class="muted">Purged.</p>' : isVideo ? '<video id="player" controls></video>' : '<div id="mediaHolder" class="muted">Loading…</div>'}
+        ${
+          s.mediaAsset.deletedAt
+            ? '<p class="muted">Purged.</p>'
+            : isVideo
+              ? `${run && run.panoramaBlobKey ? '<div class="evidence-tabs"><button id="tabPano" class="active">Stitched list</button><button id="tabVideo">Recording</button></div>' : ""}
+                 <div id="panoView" class="pano-wrap" ${run && run.panoramaBlobKey ? "" : "hidden"}><img id="panoImg" alt="stitched transaction list" /><div id="panoHighlight" class="pano-highlight"></div></div>
+                 <div id="videoView" class="video-wrap" ${run && run.panoramaBlobKey ? "hidden" : ""}><video id="player" controls></video><div id="rowHighlight" class="row-highlight"></div></div>`
+              : '<div id="mediaHolder" class="muted">Loading…</div>'
+        }
       </div>
       <div class="panel">
-        <h3>Extracted rows ${run ? `<span class="small muted">(run ${fmtDate(run.startedAt)}, ${run.status}${run.costUsd != null ? ", $" + Number(run.costUsd).toFixed(4) : ""})</span>` : ""}</h3>
+        <h3>Extracted rows ${run ? `<span class="small muted">(run ${fmtDate(run.startedAt)}, ${run.status}${run.costUsd != null ? ", $" + Number(run.costUsd).toFixed(4) : ""}${run.frameCount != null ? `, ${run.frameCount} frames → ${run.tileCount} tile${run.tileCount === 1 ? "" : "s"}` : ""})</span>` : ""}</h3>
         ${
           run && run.reconciliation
             ? `<p class="small">Wagered <b>${Number(run.reconciliation.wageredTotal).toFixed(2)}</b>
                ${run.reconciliation.grantedAmount != null ? `vs granted <b>${Number(run.reconciliation.grantedAmount).toFixed(2)}</b>` : ""}
-               — arithmetic ${run.reconciliation.arithmeticOk ? '<span class="ok-text">ok</span>' : '<span class="error">mismatch</span>'}</p>`
+               — arithmetic ${run.reconciliation.arithmeticOk ? '<span class="ok-text">ok</span>' : '<span class="error">mismatch</span>'}
+               ${chainSummary(run.reconciliation)}</p>`
             : ""
         }
         <div class="rowlist">
           <table>
-            <thead><tr><th>t</th><th>Timestamp</th><th>Type</th><th>Amount</th><th>Balance</th><th>Conf.</th></tr></thead>
+            <thead><tr><th>t</th><th>Timestamp</th><th>Type</th><th>Description</th><th>Amount</th><th>Balance (before→after)</th><th>Conf.</th></tr></thead>
             <tbody id="rowsBody">
               ${
                 run && run.rows.length
                   ? run.rows
-                      .map(
-                        (r, i) => `<tr data-t="${r.sourceFrameTs}" id="row-${i}">
-                          <td>${Number(r.sourceFrameTs).toFixed(1)}s</td>
+                      .map((r, i) => {
+                        const before = r.balanceBefore != null ? Number(r.balanceBefore).toFixed(2) : null;
+                        const after = r.balanceAfter != null ? Number(r.balanceAfter).toFixed(2) : "—";
+                        const balanceCell = before ? `${before} → ${after}` : after;
+                        const hasBox = [r.boxX, r.boxY, r.boxW, r.boxH].every((v) => v != null);
+                        const boxAttrs = hasBox
+                          ? ` data-box-x="${r.boxX}" data-box-y="${r.boxY}" data-box-w="${r.boxW}" data-box-h="${r.boxH}"`
+                          : "";
+                        const panoAttrs = r.panoramaTop != null ? ` data-pano-top="${r.panoramaTop}" data-pano-bottom="${r.panoramaBottom}"` : "";
+                        return `<tr data-t="${r.sourceFrameTs ?? ""}"${boxAttrs}${panoAttrs} id="row-${i}" class="${r.partial ? "partial" : ""}" title="${r.partial ? "cut off at the edge of the recording — partial read" : ""}">
+                          <td>${r.sourceFrameTs != null ? Number(r.sourceFrameTs).toFixed(1) + "s" : "—"}</td>
                           <td>${esc(r.timestamp ? fmtDate(r.timestamp) : "—")}</td>
                           <td>${esc(r.type || "—")}</td>
+                          <td class="small muted">${esc(r.description || "—")}</td>
                           <td>${r.amount != null ? Number(r.amount).toFixed(2) : "—"}</td>
-                          <td>${r.balanceAfter != null ? Number(r.balanceAfter).toFixed(2) : "—"}</td>
+                          <td>${balanceCell}</td>
                           <td>${r.confidence != null ? Number(r.confidence).toFixed(2) : "—"}</td>
-                        </tr>`,
-                      )
+                        </tr>`;
+                      })
                       .join("")
-                  : `<tr><td colspan="6" class="muted">No extraction run yet.</td></tr>`
+                  : `<tr><td colspan="7" class="muted">No extraction run yet.</td></tr>`
               }
             </tbody>
           </table>
@@ -309,10 +348,27 @@ async function viewSubmission(root, id) {
     const url = URL.createObjectURL(blob);
     if (isVideo) {
       root.querySelector("#player").src = url;
+      if (run && run.panoramaBlobKey) {
+        const pres = await api(`/submissions/${id}/extraction-runs/${run.id}/panorama`);
+        root.querySelector("#panoImg").src = URL.createObjectURL(await pres.blob());
+      }
     } else {
       const holder = root.querySelector("#mediaHolder");
       if (holder) holder.innerHTML = `<img src="${url}" style="max-width:100%;border-radius:8px" />`;
     }
+  }
+
+  const tabPano = root.querySelector("#tabPano");
+  const tabVideo = root.querySelector("#tabVideo");
+  if (tabPano && tabVideo) {
+    const show = (which) => {
+      root.querySelector("#panoView").hidden = which !== "pano";
+      root.querySelector("#videoView").hidden = which !== "video";
+      tabPano.classList.toggle("active", which === "pano");
+      tabVideo.classList.toggle("active", which === "video");
+    };
+    tabPano.addEventListener("click", () => show("pano"));
+    tabVideo.addEventListener("click", () => show("video"));
   }
 
   root.querySelectorAll("#rowsBody tr[data-t]").forEach((tr) => {
@@ -320,9 +376,33 @@ async function viewSubmission(root, id) {
       root.querySelectorAll("#rowsBody tr").forEach((x) => x.classList.remove("active"));
       tr.classList.add("active");
       const player = root.querySelector("#player");
-      if (player) {
+      if (player && tr.dataset.t) {
         player.currentTime = parseFloat(tr.dataset.t);
         player.pause();
+      }
+      const panoImg = root.querySelector("#panoImg");
+      const panoHl = root.querySelector("#panoHighlight");
+      if (panoImg && panoHl && tr.dataset.panoTop != null && panoImg.naturalHeight) {
+        const k = panoImg.clientWidth / panoImg.naturalWidth;
+        const top = Number(tr.dataset.panoTop) * k;
+        const h = (Number(tr.dataset.panoBottom) - Number(tr.dataset.panoTop)) * k;
+        panoHl.style.top = top + "px";
+        panoHl.style.height = h + "px";
+        panoHl.classList.add("show");
+        const wrap = root.querySelector("#panoView");
+        wrap.scrollTop = Math.max(0, top - wrap.clientHeight / 2 + h / 2);
+      }
+      const highlight = root.querySelector("#rowHighlight");
+      if (highlight) {
+        if (tr.dataset.boxX != null) {
+          highlight.style.left = Number(tr.dataset.boxX) * 100 + "%";
+          highlight.style.top = Number(tr.dataset.boxY) * 100 + "%";
+          highlight.style.width = Number(tr.dataset.boxW) * 100 + "%";
+          highlight.style.height = Number(tr.dataset.boxH) * 100 + "%";
+          highlight.classList.add("show");
+        } else {
+          highlight.classList.remove("show");
+        }
       }
     });
   });

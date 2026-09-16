@@ -34,8 +34,7 @@ async function main() {
     intakeRoot: config.DROPBOX_INTAKE_ROOT,
     inboundEmailToken: config.INBOUND_EMAIL_TOKEN,
     extractorVersion: config.EXTRACTOR_VERSION,
-    frameIntervalSeconds: config.FRAME_INTERVAL_SECONDS,
-    dedupHammingThreshold: config.DEDUP_HAMMING_THRESHOLD,
+    panoramaFps: config.PANORAMA_FPS,
     autoExtractOnIngest: config.AUTO_EXTRACT_ON_INGEST,
     dropboxQuotaWarningThreshold: config.DROPBOX_QUOTA_WARNING_THRESHOLD,
   };

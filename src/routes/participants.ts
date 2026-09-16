@@ -76,7 +76,19 @@ export async function registerParticipantRoutes(app: FastifyInstance, opts: { de
       );
       reply.code(201).send(fileRequest);
     } catch (err) {
-      reply.code(404).send({ error: (err as Error).message });
+      if (err instanceof Error && err.message.startsWith("No enrollment")) {
+        reply.code(404).send({ error: err.message });
+        return;
+      }
+      // Anything else here is Dropbox itself failing (bad/expired token, missing
+      // scope, quota, etc.) — a 502, not a 404, and worth surfacing verbatim
+      // rather than masking it as "not found".
+      request.log.error(err, "dropbox file request creation failed");
+      const dropboxError = (err as { error?: unknown })?.error;
+      reply.code(502).send({
+        error: "dropbox_error",
+        detail: dropboxError ?? (err as Error).message,
+      });
     }
   });
 }

@@ -10,8 +10,7 @@ import type { AppDeps } from "../app.js";
 export interface AutoExtractConfig {
   visionExtractor: VisionExtractor;
   extractorVersion: string;
-  frameIntervalSeconds: number;
-  dedupHammingThreshold: number;
+  panoramaFps: number;
 }
 
 export interface SyncDeps {
@@ -34,8 +33,7 @@ export function buildSyncDeps(deps: AppDeps): SyncDeps {
       ? {
           visionExtractor: deps.visionExtractor,
           extractorVersion: deps.extractorVersion,
-          frameIntervalSeconds: deps.frameIntervalSeconds,
-          dedupHammingThreshold: deps.dedupHammingThreshold,
+          panoramaFps: deps.panoramaFps,
         }
       : undefined,
   };
@@ -134,8 +132,7 @@ export async function syncDropbox(deps: SyncDeps): Promise<SyncResult> {
               objectStore,
               visionExtractor: deps.autoExtract.visionExtractor,
               extractorVersion: deps.autoExtract.extractorVersion,
-              frameIntervalSeconds: deps.autoExtract.frameIntervalSeconds,
-              dedupHammingThreshold: deps.autoExtract.dedupHammingThreshold,
+              panoramaFps: deps.autoExtract.panoramaFps,
             },
             submissionId,
           );

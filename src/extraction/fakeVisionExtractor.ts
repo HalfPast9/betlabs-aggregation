@@ -1,19 +1,20 @@
-import type { FrameInput, RawExtractedRow, VisionExtractionResult, VisionExtractor } from "./visionExtractor.js";
+import type { RawExtractedRow, TileInput, VisionExtractionResult, VisionExtractor } from "./visionExtractor.js";
 
-export type FrameScript = (frame: FrameInput) => RawExtractedRow[];
+export type TileScript = (tile: TileInput) => RawExtractedRow[];
 
 /**
  * Deterministic stand-in for a vision model, used in tests and as the
  * default local-dev mode (no API key required — mirrors FakeDropboxClient).
- * Pass a script mapping a frame to the rows it "reads"; defaults to reading
+ * Pass a script mapping a tile to the rows it "reads"; defaults to reading
  * nothing.
  */
 export class FakeVisionExtractor implements VisionExtractor {
-  constructor(private readonly script: FrameScript = () => []) {}
+  readonly model = "fake";
+  constructor(private readonly script: TileScript = () => []) {}
 
-  async extractRows(frames: FrameInput[]): Promise<VisionExtractionResult> {
+  async extractRows(tiles: TileInput[]): Promise<VisionExtractionResult> {
     return {
-      frames: frames.map((f) => ({ frameIndex: f.index, rows: this.script(f) })),
+      tiles: tiles.map((t) => ({ tileIndex: t.index, rows: this.script(t) })),
       inputTokens: 0,
       outputTokens: 0,
       costUsd: 0,

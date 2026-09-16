@@ -4,3 +4,16 @@ dist/
 data/objects/
 *.log
 .DS_Store
+
+# Real sample evidence dropped at repo root for local testing (real emails,
+# real screen recordings) — never belongs in git history. Root-only patterns
+# (leading /) so this doesn't hide anything elsewhere in the tree.
+/*.eml
+/*.msg
+/*.mov
+/*.mp4
+/*.m4v
+
+# Extraction ground-truth fixtures are exported from real participant
+# recordings — keep them local (see docs/extraction-benchmark.md).
+/eval/*.json
