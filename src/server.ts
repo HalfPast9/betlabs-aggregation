@@ -3,7 +3,9 @@ import { getPrisma } from "./db/client.js";
 import { createObjectStore } from "./storage/objectStore.js";
 import { createDropboxClient } from "./dropbox/client.js";
 import { createEmailSender } from "./email/factory.js";
-import { createVisionExtractor } from "./extraction/factory.js";
+import { createCrossCheckExtractor, createVisionExtractor } from "./extraction/factory.js";
+import { createExtractionQueue } from "./jobs/extractionQueue.js";
+import { createSheetsExporter } from "./sheets/factory.js";
 import { buildApp, type AppDeps } from "./app.js";
 import { buildSyncDeps } from "./dropbox/sync.js";
 import { startDropboxPolling } from "./jobs/pollDropbox.js";
@@ -20,8 +22,14 @@ async function main() {
   const dropbox = createDropboxClient(config);
   const emailSender = createEmailSender(config);
   const visionExtractor = createVisionExtractor(config);
+  const crossCheckExtractor = createCrossCheckExtractor(config);
 
   await ensureBootstrapAdmin(prisma, config.STAFF_API_TOKEN);
+
+  const extractionQueue = createExtractionQueue(
+    { prisma, objectStore, visionExtractor, crossCheckExtractor, extractorVersion: config.EXTRACTOR_VERSION, panoramaFps: config.PANORAMA_FPS },
+    (err, runId) => console.error(`extraction run ${runId} failed:`, err),
+  );
 
   const deps: AppDeps = {
     prisma,
@@ -29,6 +37,9 @@ async function main() {
     objectStore,
     emailSender,
     visionExtractor,
+    extractionQueue,
+    sheetsExporter: createSheetsExporter(config, objectStore),
+    publicBaseUrl: config.PUBLIC_BASE_URL,
     staffApiToken: config.STAFF_API_TOKEN,
     dropboxAppSecret: config.DROPBOX_APP_SECRET,
     intakeRoot: config.DROPBOX_INTAKE_ROOT,
@@ -40,6 +51,9 @@ async function main() {
   };
 
   const app = buildApp(deps);
+
+  const recovered = await extractionQueue.recover();
+  if (recovered > 0) app.log.info(`re-queued ${recovered} extraction run(s) left unfinished by a previous process`);
 
   startDropboxPolling(buildSyncDeps(deps), config.DROPBOX_POLL_INTERVAL_MS, (err) =>
     app.log.error(err, "dropbox polling failed"),

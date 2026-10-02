@@ -17,6 +17,8 @@ const USD_PER_TOKEN_BY_MODEL: Record<string, { input: number; output: number }> 
   "claude-opus-5": { input: 5 / 1_000_000, output: 25 / 1_000_000 },
 };
 
+const READ_CONCURRENCY = 4;
+
 export interface ClaudeVisionExtractorOptions {
   apiKey: string;
   model?: string;
@@ -107,16 +109,24 @@ export class ClaudeVisionExtractor implements VisionExtractor {
   }
 
   async extractRows(tiles: TileInput[]): Promise<VisionExtractionResult> {
-    const results: VisionExtractionResult["tiles"] = [];
+    // Tiles are independent; read a few at a time (order of results preserved).
+    const reads = new Array<Awaited<ReturnType<ClaudeVisionExtractor["readTile"]>>>(tiles.length);
+    let next = 0;
+    const worker = async () => {
+      while (next < tiles.length) {
+        const i = next++;
+        reads[i] = await this.readTile(tiles[i]!);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(READ_CONCURRENCY, tiles.length) }, worker));
+
     let inputTokens = 0;
     let outputTokens = 0;
-
-    for (const tile of tiles) {
-      const read = await this.readTile(tile);
-      results.push({ tileIndex: tile.index, rows: read.rows });
-      inputTokens += read.inputTokens;
-      outputTokens += read.outputTokens;
-    }
+    const results: VisionExtractionResult["tiles"] = tiles.map((tile, i) => {
+      inputTokens += reads[i]!.inputTokens;
+      outputTokens += reads[i]!.outputTokens;
+      return { tileIndex: tile.index, rows: reads[i]!.rows };
+    });
 
     const rate = USD_PER_TOKEN_BY_MODEL[this.model];
     const costUsd = rate ? inputTokens * rate.input + outputTokens * rate.output : null;

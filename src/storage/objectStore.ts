@@ -6,9 +6,18 @@ import { S3ObjectStore } from "./s3ObjectStore.js";
  * Content-addressed, write-once object store. Raw media is keyed by its sha256
  * content hash (PRD §6.2 — "written once, never mutated, keyed by content hash").
  */
+export interface PutOptions {
+  /**
+   * Replace an existing object. Only for *derived* artifacts the system
+   * regenerates (an enrollment's spreadsheet export): raw evidence is keyed
+   * by content hash and must stay write-once.
+   */
+  overwrite?: boolean;
+}
+
 export interface ObjectStore {
-  /** Writes bytes under `key` if not already present; idempotent. */
-  put(key: string, data: Buffer): Promise<void>;
+  /** Writes bytes under `key` if not already present; idempotent unless `overwrite`. */
+  put(key: string, data: Buffer, opts?: PutOptions): Promise<void>;
   get(key: string): Promise<Buffer>;
   exists(key: string): Promise<boolean>;
   /** Used only by the retention job (PRD §9) — everywhere else, media is write-once. */

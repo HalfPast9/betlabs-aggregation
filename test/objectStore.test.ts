@@ -28,4 +28,18 @@ describe("LocalFsObjectStore", () => {
       await cleanup();
     }
   });
+
+  it("is write-once by default but replaces when a derived artifact asks to overwrite", async () => {
+    const { store, cleanup } = await createTmpObjectStore();
+    try {
+      await store.put("sheets/doc/index.json", Buffer.from("first"));
+      await store.put("sheets/doc/index.json", Buffer.from("second"));
+      expect((await store.get("sheets/doc/index.json")).toString()).toBe("first");
+
+      await store.put("sheets/doc/index.json", Buffer.from("second"), { overwrite: true });
+      expect((await store.get("sheets/doc/index.json")).toString()).toBe("second");
+    } finally {
+      await cleanup();
+    }
+  });
 });

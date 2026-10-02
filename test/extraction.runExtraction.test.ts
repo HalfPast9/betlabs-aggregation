@@ -241,3 +241,122 @@ describe("runExtraction", () => {
     }
   });
 });
+
+describe("runExtraction — hardening", () => {
+  const prisma = new PrismaClient();
+  let video: Buffer;
+
+  beforeAll(async () => {
+    await resetDb(prisma);
+    video = (await makeScrollVideo({ rowCount: 24, speed: 400 })).buffer;
+  });
+  afterEach(async () => {
+    await resetDb(prisma);
+  });
+  afterAll(async () => {
+    await prisma.$disconnect();
+  });
+
+  async function funded(videoBuffer: Buffer) {
+    const participant = await prisma.participant.create({ data: {} });
+    const enrollment = await prisma.enrollment.create({ data: { participantId: participant.id, casino: "AcmeCasino", state: "funded" } });
+    const contentHash = sha256Hex(videoBuffer);
+    const mediaAsset = await prisma.mediaAsset.create({ data: { blobKey: contentHash, contentHash, bytes: videoBuffer.byteLength } });
+    return prisma.submission.create({ data: { enrollmentId: enrollment.id, kind: "wager_recording", channel: "dropbox", mediaAssetId: mediaAsset.id, contentHash } });
+  }
+
+  const list: Array<Partial<RawExtractedRow>> = [
+    { timestamp: "2026-09-15 12:05", type: "win", amount: 2, balanceBefore: 99, balanceAfter: 101 },
+    { timestamp: "2026-09-15 12:04", type: "bet", amount: -1, balanceBefore: 100, balanceAfter: 99 },
+    { timestamp: "2026-09-15 12:03", type: "bet", amount: -1, balanceBefore: 101, balanceAfter: 100 },
+    { timestamp: "2026-09-15 12:02", type: "win", amount: 2, balanceBefore: 99, balanceAfter: 101 },
+    { timestamp: "2026-09-15 12:01", type: "bet", amount: -1, balanceBefore: 100, balanceAfter: 99 },
+    { timestamp: "2026-09-15 12:00", type: "deposit", amount: 100, balanceBefore: 0, balanceAfter: 100 },
+  ];
+
+  it("re-reads the tiles around a chain break before flagging, and keeps the better read", async () => {
+    const { store: objectStore, cleanup } = await createTmpObjectStore();
+    try {
+      const sub = await funded(video);
+      await objectStore.put(sub.contentHash, video);
+
+      // First read of any tile misreads row 2's balance; every later read is right.
+      let calls = 0;
+      const extractor = new FakeVisionExtractor((tile) => {
+        calls++;
+        const wrong = calls === 1;
+        return listReader(list.map((r, i) => (wrong && i === 2 ? { ...r, balanceBefore: 105 } : r)))(tile);
+      });
+      const result = await runExtraction({ prisma, objectStore, visionExtractor: extractor, extractorVersion: "test", panoramaFps: 10 }, sub.id);
+
+      expect(result.chainComplete).toBe(true);
+      const run = await prisma.extractionRun.findUniqueOrThrow({ where: { id: result.extractionRunId } });
+      expect(run.retryTiles).toBe(1);
+      const flags = await prisma.integrityFlag.findMany({ where: { submissionId: sub.id } });
+      expect(flags.some((f) => f.code === "EXTRACTION_INCOMPLETE")).toBe(false);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("cross-checks timestamps and descriptions with a second reader and records disagreements per row", async () => {
+    const { store: objectStore, cleanup } = await createTmpObjectStore();
+    try {
+      const sub = await funded(video);
+      await objectStore.put(sub.contentHash, video);
+
+      const primary = new FakeVisionExtractor(listReader(list));
+      const second = new FakeVisionExtractor(listReader(list.map((r, i) => (i === 3 ? { ...r, timestamp: "2026-09-15 12:09" } : r))));
+      const result = await runExtraction(
+        { prisma, objectStore, visionExtractor: primary, crossCheckExtractor: second, extractorVersion: "test", panoramaFps: 10 },
+        sub.id,
+      );
+
+      const run = await prisma.extractionRun.findUniqueOrThrow({ where: { id: result.extractionRunId }, include: { rows: { orderBy: { sequence: "asc" } } } });
+      expect(run.crossCheckModel).toBe("fake");
+      expect(run.rows.every((r) => r.crossChecked)).toBe(true);
+      expect(run.rows.map((r) => r.disagreements)).toEqual([[], [], [], ["timestamp"], [], []]);
+      const flags = await prisma.integrityFlag.findMany({ where: { submissionId: sub.id } });
+      expect(flags.find((f) => f.code === "READ_DISAGREEMENT")?.detail).toContain("row 3: timestamp");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("rejects a recording with no list and skips the model, unless forced", async () => {
+    const { store: objectStore, cleanup } = await createTmpObjectStore();
+    try {
+      // A static frame of nothing: no scrolling list to reconstruct.
+      const { execFile } = await import("node:child_process");
+      const { promisify } = await import("node:util");
+      const { mkdtemp, readFile, rm } = await import("node:fs/promises");
+      const { tmpdir } = await import("node:os");
+      const { join } = await import("node:path");
+      const dir = await mkdtemp(join(tmpdir(), "betlab-blank-"));
+      const out = join(dir, "blank.mp4");
+      await promisify(execFile)("ffmpeg", ["-y", "-f", "lavfi", "-i", "color=c=white:s=320x480:r=10:d=4", "-pix_fmt", "yuv420p", out]);
+      const blank = await readFile(out);
+      await rm(dir, { recursive: true, force: true });
+
+      const sub = await funded(blank);
+      await objectStore.put(sub.contentHash, blank);
+      let reads = 0;
+      const extractor = new FakeVisionExtractor(() => {
+        reads++;
+        return [];
+      });
+      const deps = { prisma, objectStore, visionExtractor: extractor, extractorVersion: "test", panoramaFps: 10 };
+
+      const result = await runExtraction(deps, sub.id);
+      expect(result.quality.verdict).toBe("reject");
+      expect(reads).toBe(0);
+      const flags = await prisma.integrityFlag.findMany({ where: { submissionId: sub.id } });
+      expect(flags.find((f) => f.code === "RECORDING_QUALITY")?.severity).toBe("high");
+
+      await runExtraction(deps, sub.id, { force: true });
+      expect(reads).toBeGreaterThan(0);
+    } finally {
+      await cleanup();
+    }
+  });
+});

@@ -1,12 +1,13 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import sharp from "sharp";
+import { renderEvidencePdf } from "../extraction/evidencePdf.js";
 import type { AppDeps } from "../app.js";
 import { requireStaffAuth } from "../lib/auth.js";
 import { sha256Hex } from "../lib/hash.js";
 import { handleWagerRecordingSubmitted } from "../enrollment/wagerRecordingIngested.js";
 import { handleEmailEvidenceSubmitted } from "../enrollment/emailEvidenceIngested.js";
 import { checkManualIntake } from "../integrity/simpleFlags.js";
-import { runExtraction } from "../extraction/runExtraction.js";
 import { verifyEmailEvidence } from "../email/verifyEmailEvidence.js";
 
 const searchQuerySchema = z.object({
@@ -118,24 +119,12 @@ export async function registerSubmissionRoutes(app: FastifyInstance, opts: { dep
       return { submission, advancedToWagerSubmitted };
     });
 
+    let extractionRunId: string | null = null;
     if (advancedToWagerSubmitted && deps.autoExtractOnIngest) {
-      try {
-        await runExtraction(
-          {
-            prisma: deps.prisma,
-            objectStore: deps.objectStore,
-            visionExtractor: deps.visionExtractor,
-            extractorVersion: deps.extractorVersion,
-            panoramaFps: deps.panoramaFps,
-          },
-          submission.id,
-        );
-      } catch (err) {
-        app.log.error(err, "auto-extraction failed after manual upload");
-      }
+      extractionRunId = (await deps.extractionQueue.enqueue(submission.id)).runId;
     }
 
-    reply.code(201).send(submission);
+    reply.code(201).send({ ...submission, extractionRunId });
   });
 
   // PRD §6.4: "submission list with filters (participant, casino, date, flag, status)".
@@ -239,4 +228,92 @@ export async function registerSubmissionRoutes(app: FastifyInstance, opts: { dep
     });
     reply.type("image/png").send(data);
   });
+
+  // Self-contained evidence document: verdicts, rows, and the stitched recording.
+  app.get<{ Params: { id: string; runId: string } }>("/submissions/:id/extraction-runs/:runId/evidence.pdf", async (request, reply) => {
+    const submission = await deps.prisma.submission.findUnique({
+      where: { id: request.params.id },
+      include: { enrollment: { include: { participant: true } }, integrityFlags: true },
+    });
+    const run = await deps.prisma.extractionRun.findFirst({
+      where: { id: request.params.runId, submissionId: request.params.id },
+      include: { rows: { orderBy: { sequence: "asc" } }, reconciliation: true },
+    });
+    if (!submission || !run) {
+      reply.code(404).send({ error: "extraction run not found" });
+      return;
+    }
+    let panorama: Buffer | null = null;
+    if (run.panoramaBlobKey) {
+      try {
+        panorama = await deps.objectStore.get(run.panoramaBlobKey);
+      } catch {
+        panorama = null;
+      }
+    }
+    const quality = run.quality as { verdict: string; reasons: string[] } | null;
+    const rec = run.reconciliation;
+    const pdf = await renderEvidencePdf({
+      submissionId: submission.id,
+      casino: submission.enrollment.casino,
+      participant: submission.enrollment.participant.contact ?? submission.enrollment.participant.email ?? submission.enrollment.participant.id,
+      receivedAt: submission.receivedAt,
+      run: { id: run.id, model: run.model, extractorVersion: run.extractorVersion, startedAt: run.startedAt, quality },
+      reconciliation: rec
+        ? {
+            wageredTotal: Number(rec.wageredTotal),
+            grantedAmount: rec.grantedAmount === null ? null : Number(rec.grantedAmount),
+            chainComplete: rec.chainComplete,
+            chainStart: rec.chainStart === null ? null : Number(rec.chainStart),
+            chainEnd: rec.chainEnd === null ? null : Number(rec.chainEnd),
+            chainBreaks: (rec.chainBreaks as Array<{ rowIndex: number; detail: string }> | null) ?? [],
+          }
+        : null,
+      flags: submission.integrityFlags.map((f) => ({ code: f.code, severity: f.severity, detail: f.detail })),
+      rows: run.rows.map((r) => ({
+        sequence: r.sequence,
+        timestamp: r.timestamp,
+        type: r.type,
+        description: r.description,
+        amount: r.amount === null ? null : Number(r.amount),
+        balanceBefore: r.balanceBefore === null ? null : Number(r.balanceBefore),
+        balanceAfter: r.balanceAfter === null ? null : Number(r.balanceAfter),
+        disagreements: r.disagreements,
+      })),
+      panorama,
+    });
+    await deps.prisma.auditEvent.create({
+      data: { actor: request.staffUser?.name ?? "unknown-staff", action: "export_evidence_pdf", target: submission.id },
+    });
+    reply.type("application/pdf").header("content-disposition", `attachment; filename="evidence-${submission.id.slice(0, 8)}.pdf"`).send(pdf);
+  });
+
+  // One row's band cut from the stitched list — the exact pixels the row was
+  // read from, for a reviewer to check a value without scrolling the panorama.
+  app.get<{ Params: { id: string; runId: string; sequence: string } }>(
+    "/submissions/:id/extraction-runs/:runId/rows/:sequence/crop.png",
+    async (request, reply) => {
+      const sequence = Number(request.params.sequence);
+      const row = await deps.prisma.transactionRow.findFirst({
+        where: { extractionRunId: request.params.runId, sequence, extractionRun: { submissionId: request.params.id } },
+        include: { extractionRun: true },
+      });
+      if (!row || !row.extractionRun.panoramaBlobKey || row.panoramaTop === null || row.panoramaBottom === null) {
+        reply.code(404).send({ error: "no crop for this row" });
+        return;
+      }
+      let pano: Buffer;
+      try {
+        pano = await deps.objectStore.get(row.extractionRun.panoramaBlobKey);
+      } catch {
+        reply.code(410).send({ error: "panorama no longer in the object store" });
+        return;
+      }
+      const meta = await sharp(pano).metadata();
+      const top = Math.max(0, Math.floor(row.panoramaTop) - 4);
+      const bottom = Math.min(meta.height!, Math.ceil(row.panoramaBottom) + 4);
+      const crop = await sharp(pano).extract({ left: 0, top, width: meta.width!, height: Math.max(1, bottom - top) }).png().toBuffer();
+      reply.type("image/png").send(crop);
+    },
+  );
 }

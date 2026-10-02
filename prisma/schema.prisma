@@ -54,6 +54,10 @@ model Enrollment {
   // not by a DB constraint.
   state         String        @default("invited")
   createdAt     DateTime      @default(now())
+  // The spreadsheet this enrollment exports to (one workbook, a tab per
+  // recording). Kept so a re-export updates it instead of making another.
+  sheetDocumentId String?
+  sheetUrl        String?
   fileRequests  FileRequest[]
   submissions   Submission[]
   decisions     Decision[]
@@ -140,6 +144,13 @@ model ExtractionRun {
   // assembly be re-run offline and read quality be scored without paying
   // for the model again.
   tileReads        Json?
+  // Recording-quality assessment from reconstruction alone (verdict +
+  // reasons), made before any model call — docs/extraction-hardening.md §4.
+  quality          Json?
+  // Tiles re-read around chain breaks before flagging (§2), and the second
+  // model used to cross-check timestamps/descriptions (§3), if any.
+  retryTiles       Int?
+  crossCheckModel  String?
   rows             TransactionRow[]
   reconciliation   Reconciliation?
   integrityFlags   IntegrityFlag[]
@@ -172,10 +183,9 @@ model TransactionRow {
   balanceAfter    Decimal?      @db.Decimal(14, 2)
   sourceFrameTs   Float?
   confidence      Float?
-  // Normalized (0-1, top-left origin) location of this row within its source
-  // frame, as estimated by the vision model — powers click-a-row →
-  // highlight-on-video in the console. Null on rows read before this field
-  // existed, or when the model didn't return one.
+  // Normalized (0-1, top-left origin) location of this row within the frame
+  // `sourceFrameTs` points at, derived from the row's panorama band — powers
+  // click-a-row → highlight-on-video in the console.
   boxX            Float?
   boxY            Float?
   boxW            Float?
@@ -186,6 +196,10 @@ model TransactionRow {
   panoramaBottom  Float?
   // No tile had the whole row — the recording started or ended mid-row.
   partial         Boolean       @default(false)
+  // Second-model read compared field by field (docs/extraction-hardening.md
+  // §3): which fields the two reads disagreed on, empty when they agree.
+  crossChecked    Boolean       @default(false)
+  disagreements   String[]      @default([])
 
   @@unique([extractionRunId, sequence])
   @@index([extractionRunId])

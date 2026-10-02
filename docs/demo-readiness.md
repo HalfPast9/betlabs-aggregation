@@ -19,8 +19,8 @@ later concern).
 
 ## What's left, in priority order
 
-1. **Write a demo script** — the actual sequence to click through live, so the meeting doesn't
-   turn into ad-libbed console navigation.
+1. ~~Write a demo script~~ — done: [`demo-script.md`](demo-script.md), with staged data via
+   `scripts/stageDemo.ts`.
 2. Test against more real recordings/casinos as they come in — four UIs are at 100% now, and each
    new one becomes a ground-truth fixture that gates further changes (`extraction-benchmark.md`).
 

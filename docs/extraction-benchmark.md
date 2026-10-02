@@ -42,17 +42,26 @@ useful when iterating on `assemble.ts` / `chain.ts`.
 
 ### Current results
 
-Four real recordings, four different casino UIs, scored with `scripts/evalExtraction.ts`:
+Four real recordings, four different casino UIs, scored with `npm run eval` — the full pipeline
+(reconstruction, normalization, retry-before-flag, Haiku 4.5 cross-check of every row):
 
-| Recording | UI shape | Rows | Recall | Precision | Wagered | Chain | Cost |
-|---|---|---|---|---|---|---|---|
-| BetMGM Ontario, 31s, 296×640 | Per-row initial/final balance, minute timestamps, near-identical rows | 86/86 | 100% | 100% | 174.20 ✓ | 1 break (expected: genuine, see below) | $0.14 |
-| BetRivers "Game History", 15s, 444×960 | Session cards (Bets / Wins / Balance after), recorded bottom→top with a scroll back | 14/14 | 100% | 100% | 57.00 ✓ | complete 80→45 | $0.05 |
-| BetRivers "Statements", 5.5s, 444×960 @25fps | Deltas only ("My Balance +$30"), no running balance; re-encoded with heavy compression on motion frames | 12/12 | 100% | 100% | 80.00 ✓ | not checkable (no balances) | $0.02 |
-| OLG-style "Transaction History", 20s, 440×960 | Paginated cards (10+10+3) with loading screens between pages, single running balance | 23/23 | 100% | 100% | 285.00 ✓ | complete 0→…→0 | $0.19 |
+| Recording | UI shape | Rows | Recall | Precision | Wagered | Chain |
+|---|---|---|---|---|---|---|
+| BetMGM Ontario, 31s, 296×640 | Per-row initial/final balance, minute timestamps, near-identical rows | 86/86 | 100% | 100% | 174.20 ✓ | 1 break (expected: genuine, see below) |
+| BetRivers "Game History", 15s, 444×960 | Session cards (Bets / Wins / Balance after), recorded bottom→top with a scroll back | 14/14 | 100% | 100% | 57.00 ✓ | complete 80→45 |
+| BetRivers "Statements", 5.5s, 444×960 @25fps | Deltas only ("My Balance +$30"), no running balance; re-encoded with heavy compression on motion frames | 12/12 | 100% | 100% | 80.00 ✓ | not checkable (no balances) |
+| OLG-style "Transaction History", 20s, 440×960 | Paginated cards (10+10+3) with loading screens between pages, single running balance | 23/23 | 100% | 100% | 285.00 ✓ | complete 0→…→0 |
 
-For comparison, the previous per-frame pipeline (Haiku 4.5, content-hash dedup) scored 4.7%
-recall / 5.4% precision on the BetMGM recording.
+**By primary model** (same four recordings, cross-check by Haiku 4.5 in both cases):
+
+| Primary model | Pass | Total cost, all four | Notes |
+|---|---|---|---|
+| Sonnet 5 | 4/4 | $0.62 | |
+| Haiku 4.5 | 4/4 | $0.43 | Failed 2/4 before post-read normalization (docs/extraction-hardening.md §1): it emitted a $0 "win" row per session card and copied signed deltas into the balance field. Every number it read was right; the rules are now code, not prompt adherence |
+| Haiku 4.5, previous per-frame pipeline | 0/1 | $0.08 | 4.7% recall on BetMGM |
+
+Cost is dominated by row count and the second read; a 20s clip with 23 large cards costs more
+than a 31s clip with 86 small rows because it cuts into more tiles.
 
 The BetMGM break is real: the app's own list shows a 1:38 PM row ending at 98 followed by
 one starting at 99 — a $1 credit that isn't in the displayed (filtered) list. The pipeline
@@ -111,6 +120,14 @@ test:
   a time-only string, which `safeParseDate` may pin to the wrong day; the chain check doesn't
   depend on it.
 
+## What the cross-check finds in practice
+
+On the four recordings the second read agreed with the primary on every row except where it
+had dropped or added a row in a tile — which the matcher now handles by finding the counterpart
+through the chain-protected fields. Zero real timestamp or description disagreements so far,
+which is what "the reads are not the weak link" looks like as a measurement rather than a
+belief. The check earns its cost the day a model *does* misread a time.
+
 ## Evaluating a different model (the benchmark to build)
 
 Production will likely run a cheaper or fine-tuned model rather than Sonnet 5. Swapping is a
@@ -123,11 +140,10 @@ pieces above:
    per-row dates, dark mode, fast flicks, scroll-back-and-forth, a list with a filtered-out
    adjustment, and a recording that starts or ends mid-row. Ground truth for each, verified by
    chain + eye as above.
-2. **Per-model runs.** `runExtraction` records `model` on every run. A script that re-runs
-   extraction for every corpus submission under each candidate model (or replays stored
-   `tileReads` when only the assembly changed) and writes one row per (recording, model) with:
-   recall, precision, wagered-total error, chain breaks vs expected, `READ_CONFLICT` count
-   (overlapping tiles disagreeing is a read-quality signal on its own), cost, latency.
+2. **Per-model runs.** Done: `npm run eval -- --model <id>` re-extracts every fixture under a
+   candidate model and prints recall, precision, wagered error, chain breaks vs expected, cost
+   and time per recording; `scripts/runExtraction.ts <submission> --model <id>` does one.
+   Replaying stored `tileReads` for assembly-only changes is still manual.
 3. **Field-level breakdown.** Which field is wrong when a row is wrong — timestamp, type, amount,
    or balance — since those fail differently across models (small models drop the date part of a
    timestamp long before they misread an amount).
@@ -137,7 +153,6 @@ pieces above:
 5. **Prompt/schema drift protection.** The tool schema and prompt in `claudeVisionExtractor.ts`
    are inputs to the benchmark too; a change there re-runs the corpus.
 
-None of this is built yet beyond the per-recording harness. That harness, run over the four
-fixtures in `eval/`, is what gates changes to this pipeline now; every one of the four must
-PASS. The corpus needs more real recordings — a fifth UI is the most valuable thing Betlab can
-supply.
+Items 1, 3 and 4 remain. `npm run eval` over the four fixtures in `eval/` is what gates
+changes to this pipeline now; every one must PASS on the configured model. The corpus needs
+more real recordings — a fifth UI is the most valuable thing Betlab can supply.

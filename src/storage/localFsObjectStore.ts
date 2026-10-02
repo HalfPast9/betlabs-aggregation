@@ -1,7 +1,7 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { ObjectStore } from "./objectStore.js";
+import type { ObjectStore, PutOptions } from "./objectStore.js";
 
 /** Local-filesystem backed ObjectStore, for dev and until a hosting vendor is picked (PRD D2). */
 export class LocalFsObjectStore implements ObjectStore {
@@ -12,9 +12,9 @@ export class LocalFsObjectStore implements ObjectStore {
     return join(this.rootDir, key.slice(0, 2), key);
   }
 
-  async put(key: string, data: Buffer): Promise<void> {
+  async put(key: string, data: Buffer, opts: PutOptions = {}): Promise<void> {
     const path = this.pathFor(key);
-    if (existsSync(path)) return;
+    if (existsSync(path) && !opts.overwrite) return;
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, data);
   }

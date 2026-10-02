@@ -40,6 +40,9 @@ describe("Dropbox ingest auto-triggers extraction end to end", () => {
     const reloaded = await ctx.prisma.enrollment.findUniqueOrThrow({ where: { id: enrollment.id } });
     expect(reloaded.state).toBe("wager_submitted");
 
+    // Extraction is queued, not awaited by the webhook.
+    await ctx.extractionQueue.drain();
+
     const submission = await ctx.prisma.submission.findFirstOrThrow({ where: { enrollmentId: enrollment.id } });
     const run = await ctx.prisma.extractionRun.findFirstOrThrow({
       where: { submissionId: submission.id },

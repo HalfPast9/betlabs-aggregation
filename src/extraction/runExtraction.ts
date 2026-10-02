@@ -6,6 +6,7 @@ import type { VisionExtractor } from "./visionExtractor.js";
 import { computeDHash, probeFormat, probeKeyframeTimes } from "./ffmpeg.js";
 import {
   compositeSegment,
+  cutBandTile,
   detectRowBands,
   locateInFrames,
   planReconstruction,
@@ -13,10 +14,15 @@ import {
   tilePanorama,
   type PanoramaImage,
   type ReconstructionPlan,
+  type RowBand,
   type Tile,
 } from "./panorama.js";
-import { assembleRows, type AssembledRow } from "./assemble.js";
-import { verifyChain } from "./chain.js";
+import { assembleRows, foldSegments, type AssembledRow } from "./assemble.js";
+import { normalizeRows } from "./normalize.js";
+import { verifyChain, type ChainResult } from "./chain.js";
+import { assessRecording, type RecordingQuality } from "./quality.js";
+import { crossCheckRows } from "./crossCheck.js";
+import type { TileReadResult, VisionExtractionResult } from "./visionExtractor.js";
 import { validateArithmetic, validateTimestamps, safeParseDate } from "./validate.js";
 import { reconcile } from "./reconcile.js";
 import { sha256Hex } from "../lib/hash.js";
@@ -28,9 +34,18 @@ export interface RunExtractionDeps {
   prisma: PrismaClient;
   objectStore: ObjectStore;
   visionExtractor: VisionExtractor;
+  /** Independent second reader for timestamps/descriptions (docs/extraction-hardening.md §3). Absent = no cross-check. */
+  crossCheckExtractor?: VisionExtractor;
   extractorVersion: string;
   /** Frames per second to decode for scroll reconstruction. Denser = more robust to fast flicks; CPU only. */
   panoramaFps: number;
+}
+
+export interface RunExtractionOptions {
+  /** Execute an ExtractionRun row that was created earlier (queued) instead of creating one. */
+  runId?: string;
+  /** Read the recording even if its quality assessment says reject. */
+  force?: boolean;
 }
 
 export interface RunExtractionResult {
@@ -38,7 +53,11 @@ export interface RunExtractionResult {
   rowCount: number;
   flagCount: number;
   chainComplete: boolean;
+  quality: RecordingQuality;
 }
+
+/** Tiles re-read around chain breaks, at most, per run. */
+const RETRY_MAX_TILES = 4;
 
 const LOW_CONFIDENCE_THRESHOLD = 0.5;
 
@@ -49,15 +68,22 @@ const LOW_CONFIDENCE_THRESHOLD = 0.5;
  * position → verify the balance chain → reconcile against the grant.
  * Everything is persisted as a new `extraction_run` (re-runnable per §6.2).
  */
-export async function runExtraction(deps: RunExtractionDeps, submissionId: string): Promise<RunExtractionResult> {
+export async function runExtraction(deps: RunExtractionDeps, submissionId: string, options: RunExtractionOptions = {}): Promise<RunExtractionResult> {
   const submission = await deps.prisma.submission.findUniqueOrThrow({
     where: { id: submissionId },
     include: { mediaAsset: true, enrollment: { include: { grant: true } } },
   });
 
-  const run = await deps.prisma.extractionRun.create({
-    data: { submissionId, extractorVersion: deps.extractorVersion, model: deps.visionExtractor.model, status: "running" },
-  });
+  const runData = {
+    extractorVersion: deps.extractorVersion,
+    model: deps.visionExtractor.model,
+    crossCheckModel: deps.crossCheckExtractor?.model ?? null,
+    status: "running",
+    startedAt: new Date(),
+  };
+  const run = options.runId
+    ? await deps.prisma.extractionRun.update({ where: { id: options.runId }, data: runData })
+    : await deps.prisma.extractionRun.create({ data: { submissionId, ...runData } });
 
   try {
     const videoBuffer = await deps.objectStore.get(submission.mediaAsset.blobKey);
@@ -66,41 +92,95 @@ export async function runExtraction(deps: RunExtractionDeps, submissionId: strin
     let panoramas: PanoramaImage[];
     let tiles: Tile[];
     let plan: ReconstructionPlan;
+    let bandsPerSegment: RowBand[][];
     try {
       firstFrameJpeg = await readFile(frames.files[0]!);
       plan = await planReconstruction(frames);
       panoramas = [];
       tiles = [];
+      bandsPerSegment = [];
       for (let si = 0; si < plan.segments.length; si++) {
         const pano = await compositeSegment(frames, plan, plan.segments[si]!);
         panoramas.push(pano);
         const bands = await detectRowBands(pano.png);
+        bandsPerSegment.push(bands);
         tiles.push(...(await tilePanorama(pano, si, tiles.length, { bands })));
       }
     } finally {
       await frames.cleanup();
     }
 
-    const visionResult = await deps.visionExtractor.extractRows(
-      tiles.map((t) => ({ index: t.index, jpegBuffer: t.jpegBuffer, top: t.top, bottom: t.bottom, scale: t.scale })),
-    );
+    // Judge the recording before spending on the model (§4). A rejected
+    // recording is stored with its verdict and no rows so the runner can
+    // re-record now; `force` reads it anyway.
+    const quality = assessRecording(plan, bandsPerSegment, { count: frames.files.length, fps: frames.fps });
+    const shouldRead = quality.verdict !== "reject" || options.force === true;
+
+    const toInputs = (ts: Tile[]) => ts.map((t) => ({ index: t.index, jpegBuffer: t.jpegBuffer, top: t.top, bottom: t.bottom, scale: t.scale }));
+    let visionResult: VisionExtractionResult = shouldRead
+      ? await deps.visionExtractor.extractRows(toInputs(tiles))
+      : { tiles: [], inputTokens: 0, outputTokens: 0, costUsd: 0 };
 
     // Segment order: within a list broken by a flick, the scroll direction
     // says which piece is above; across paginated pages, the later page is
     // the older one. The balance chain decides — whichever order links up.
     let scrollsTowardTop = plan.segments.reduce((acc, s) => acc + (s.placements[s.placements.length - 1]!.top - s.placements[0]!.top), 0) < 0;
-    let assembly = assembleRows(tiles, visionResult.tiles, scrollsTowardTop);
-    let chain = verifyChain(assembly.rows);
-    if (plan.segments.length > 1) {
-      const flipped = assembleRows(tiles, visionResult.tiles, !scrollsTowardTop);
-      const flippedChain = verifyChain(flipped.rows);
-      if (flippedChain.breaks.length < chain.breaks.length) {
-        scrollsTowardTop = !scrollsTowardTop;
-        assembly = flipped;
-        chain = flippedChain;
+    const assembleAndVerify = (readTiles: Tile[], reads: TileReadResult[], towardTop: boolean) => {
+      const assembly = assembleRows(readTiles, reads, towardTop);
+      const rows = foldSegments(normalizeRows(assembly.rows));
+      return { assembly, rows, chain: verifyChain(rows) };
+    };
+    const bestOrder = (readTiles: Tile[], reads: TileReadResult[]) => {
+      let best = { towardTop: scrollsTowardTop, ...assembleAndVerify(readTiles, reads, scrollsTowardTop) };
+      if (plan.segments.length > 1) {
+        const flipped = { towardTop: !scrollsTowardTop, ...assembleAndVerify(readTiles, reads, !scrollsTowardTop) };
+        if (flipped.chain.breaks.length < best.chain.breaks.length) best = flipped;
+      }
+      return best;
+    };
+    let best = bestOrder(tiles, visionResult.tiles);
+
+    // Retry before flagging (§2): a chain break is more often one misread
+    // than a missing transaction. Re-read the tiles around each break in a
+    // different framing (one band of context each side) and keep the
+    // result if it links up better.
+    let retryTiles = 0;
+    if (shouldRead && best.chain.breaks.length > 0) {
+      const retried = await retryAroundBreaks(deps, panoramas, bandsPerSegment, tiles, best.rows, best.chain);
+      if (retried) {
+        retryTiles = retried.tiles.length;
+        const merged: TileReadResult[] = [...visionResult.tiles.filter((r) => !retried.replaced.has(r.tileIndex)), ...retried.result.tiles];
+        const keptTiles = [...tiles.filter((t) => !retried.replaced.has(t.index)), ...retried.tiles];
+        const candidate = bestOrder(keptTiles, merged);
+        visionResult = {
+          tiles: visionResult.tiles,
+          inputTokens: visionResult.inputTokens + retried.result.inputTokens,
+          outputTokens: visionResult.outputTokens + retried.result.outputTokens,
+          costUsd: visionResult.costUsd === null || retried.result.costUsd === null ? null : visionResult.costUsd + retried.result.costUsd,
+        };
+        if (candidate.chain.breaks.length < best.chain.breaks.length) {
+          best = candidate;
+          tiles = keptTiles;
+          visionResult = { ...visionResult, tiles: merged };
+        }
       }
     }
-    const rows = assembly.rows;
+    scrollsTowardTop = best.towardTop;
+    const { assembly, rows, chain } = best;
+
+    // Independent second read for the fields the chain can't protect (§3).
+    let crossCheck: ReturnType<typeof crossCheckRows> | null = null;
+    if (shouldRead && deps.crossCheckExtractor && rows.length > 0) {
+      const second = await deps.crossCheckExtractor.extractRows(toInputs(tiles));
+      const secondRows = foldSegments(normalizeRows(assembleRows(tiles, second.tiles, scrollsTowardTop).rows));
+      crossCheck = crossCheckRows(rows, secondRows);
+      visionResult = {
+        ...visionResult,
+        inputTokens: visionResult.inputTokens + second.inputTokens,
+        outputTokens: visionResult.outputTokens + second.outputTokens,
+        costUsd: visionResult.costUsd === null || second.costUsd === null ? null : visionResult.costUsd + second.costUsd,
+      };
+    }
     const chronological = chain.newestFirst ? [...rows].reverse() : rows;
 
     const arithmeticFlags = validateArithmetic(rows);
@@ -132,6 +212,33 @@ export async function runExtraction(deps: RunExtractionDeps, submissionId: strin
         code: "READ_CONFLICT",
         severity: "warning",
         detail: `${assembly.conflicts} row(s) were read differently by two overlapping tiles; the higher-quality read was kept`,
+      });
+    }
+    if (quality.verdict !== "ok") {
+      allFlags.push({
+        code: "RECORDING_QUALITY",
+        severity: quality.verdict === "reject" ? "high" : "warning",
+        detail: `${quality.verdict === "reject" ? "Recording rejected" : "Recording quality"}: ${quality.reasons.join("; ")}${quality.verdict === "reject" && !shouldRead ? " — not read; re-record, or extract with force=true" : ""}`,
+      });
+    }
+    if (shouldRead && rows.length > 0 && chain.checkedRows === 0) {
+      allFlags.push({
+        code: "RECORDING_QUALITY",
+        severity: "warning",
+        detail: "This list shows no running balance, so completeness can't be verified by the balance chain — rows rest on the reconstruction alone",
+      });
+    }
+    if (crossCheck && crossCheck.disagreeingRows > 0) {
+      const which = rows
+        .map((r, i) => ({ i, d: crossCheck!.perRow[i]!.disagreements }))
+        .filter((x) => x.d.length > 0)
+        .slice(0, 5)
+        .map((x) => `row ${x.i}: ${x.d.join("/")}`)
+        .join("; ");
+      allFlags.push({
+        code: "READ_DISAGREEMENT",
+        severity: "warning",
+        detail: `A second read (${deps.crossCheckExtractor!.model}) disagreed on ${crossCheck.disagreeingRows} row(s): ${which}${crossCheck.disagreeingRows > 5 ? "; …" : ""}`,
       });
     }
 
@@ -212,6 +319,8 @@ export async function runExtraction(deps: RunExtractionDeps, submissionId: strin
             segmentIndex: row.segmentIndex,
             panoramaTop: row.panoramaTop + (segmentOffsets[row.segmentIndex] ?? 0),
             panoramaBottom: row.panoramaBottom + (segmentOffsets[row.segmentIndex] ?? 0),
+            crossChecked: crossCheck?.perRow[i]?.crossChecked ?? false,
+            disagreements: crossCheck?.perRow[i]?.disagreements ?? [],
             sourceFrameTs: loc?.placement.timestampSeconds ?? null,
             boxX: loc ? 0 : null,
             boxY: loc ? (plan.scrollRegion.top + loc.yInRegion) / frames.height : null,
@@ -258,6 +367,8 @@ export async function runExtraction(deps: RunExtractionDeps, submissionId: strin
           frameCount: frames.files.length,
           tileCount: tiles.length,
           panoramaBlobKey,
+          quality: { verdict: quality.verdict, reasons: quality.reasons, metrics: { ...quality.metrics } },
+          retryTiles,
           tileReads: {
             tiles: tiles.map((t) => ({ index: t.index, segmentIndex: t.segmentIndex, top: t.top, bottom: t.bottom, scale: t.scale, bands: t.bands ? t.bands.map((b) => ({ ...b })) : null, firstBandIndex: t.firstBandIndex })),
             reads: visionResult.tiles.map((r) => ({ tileIndex: r.tileIndex, rows: r.rows.map((row) => ({ ...row })) })),
@@ -266,7 +377,7 @@ export async function runExtraction(deps: RunExtractionDeps, submissionId: strin
       });
     });
 
-    return { extractionRunId: run.id, rowCount: rows.length, flagCount: allFlags.length, chainComplete: chain.complete };
+    return { extractionRunId: run.id, rowCount: rows.length, flagCount: allFlags.length, chainComplete: chain.complete, quality };
   } catch (err) {
     await deps.prisma.extractionRun.update({
       where: { id: run.id },
@@ -274,6 +385,44 @@ export async function runExtraction(deps: RunExtractionDeps, submissionId: strin
     });
     throw err;
   }
+}
+
+/**
+ * Re-read the tiles whose bands hold the rows on either side of each chain
+ * break, cut with one extra band of context above and below.
+ */
+async function retryAroundBreaks(
+  deps: RunExtractionDeps,
+  panoramas: PanoramaImage[],
+  bandsPerSegment: RowBand[][],
+  tiles: Tile[],
+  rows: AssembledRow[],
+  chain: ChainResult,
+): Promise<{ tiles: Tile[]; result: VisionExtractionResult; replaced: Set<number> } | null> {
+  const targets = new Map<number, Tile>();
+  for (const b of chain.breaks) {
+    for (const i of [b.rowIndex - 1, b.rowIndex, b.rowIndex + 1]) {
+      const row = rows[i];
+      if (!row) continue;
+      const tile = tiles.find((t) => t.index === row.tileIndex);
+      if (tile && tile.bands) targets.set(tile.index, tile);
+    }
+  }
+  const chosen = [...targets.values()].slice(0, RETRY_MAX_TILES);
+  if (chosen.length === 0) return null;
+
+  let nextIndex = Math.max(...tiles.map((t) => t.index)) + 1;
+  const retryTiles: Tile[] = [];
+  for (const t of chosen) {
+    const bands = bandsPerSegment[t.segmentIndex]!;
+    const first = t.firstBandIndex - 1;
+    const last = t.firstBandIndex + t.bands!.length; // one band of context each side
+    retryTiles.push(await cutBandTile(panoramas[t.segmentIndex]!, bands, first, last, t.segmentIndex, nextIndex++));
+  }
+  const result = await deps.visionExtractor.extractRows(
+    retryTiles.map((t) => ({ index: t.index, jpegBuffer: t.jpegBuffer, top: t.top, bottom: t.bottom, scale: t.scale })),
+  );
+  return { tiles: retryTiles, result, replaced: new Set(chosen.map((t) => t.index)) };
 }
 
 function rowKey(row: AssembledRow): string {

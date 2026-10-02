@@ -14,7 +14,9 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:migrate:deploy": "prisma migrate deploy",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "eval": "tsx scripts/evalAll.ts",
+    "extract": "tsx scripts/runExtraction.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.126.0",
@@ -27,6 +29,7 @@
     "mailauth": "^5.0.3",
     "mailparser": "^3.9.28",
     "nodemailer": "^10.0.10",
+    "pdfkit": "^0.20.2",
     "sharp": "^0.35.4",
     "zod": "^3.23.8"
   },
@@ -34,6 +37,7 @@
     "@types/mailparser": "^3.4.6",
     "@types/node": "^20.16.5",
     "@types/nodemailer": "^8.0.1",
+    "@types/pdfkit": "^0.17.6",
     "light-my-request": "^5.13.0",
     "prisma": "^5.20.0",
     "tsx": "^4.19.1",

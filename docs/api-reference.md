@@ -43,7 +43,7 @@ allowed to do.
 | `GET` | `/webhooks/dropbox?challenge=` | Dropbox's webhook verification handshake — echoes `challenge` back |
 | `POST` | `/webhooks/dropbox` | Dropbox change notification. Verifies `X-Dropbox-Signature` when `DROPBOX_APP_SECRET` is set, then runs a full sync (and any auto-triggered extraction) *before* replying — see [`deployment.md`](deployment.md#webhook-timing) for why |
 | `POST` | `/inbound/email?token=` | Raw MIME body (any content type not otherwise claimed), or `multipart/form-data` with the raw MIME in a field named `email` (the shape SendGrid Inbound Parse uses). `token` is checked against `INBOUND_EMAIL_TOKEN` when that's configured |
-| `POST` | `/submissions/manual` | `multipart/form-data`: `enrollmentId`, `file`, optional `kind` (defaults `wager_recording`). Out-of-band fallback; flagged `MANUAL_INTAKE`. `kind=signup_email` runs the same real DKIM verification as the automated inbound-email path — a runner relaying a participant's `.eml` gets the same tier a self-forwarded one would (see `architecture.md`) |
+| `POST` | `/submissions/manual` | `multipart/form-data`: `enrollmentId`, `file`, optional `kind` (defaults `wager_recording`). Out-of-band fallback; flagged `MANUAL_INTAKE`. Response includes `extractionRunId` when extraction was queued. `kind=signup_email` runs the same real DKIM verification as the automated inbound-email path — a runner relaying a participant's `.eml` gets the same tier a self-forwarded one would (see `architecture.md`) |
 
 ## Lifecycle
 
@@ -78,7 +78,14 @@ the decision's `actor` (not a header); there's nothing to pass beyond the auth t
 | `GET` | `/submissions?participantId=&enrollmentId=&casino=&state=&flag=&from=&to=` | `state`/`casino` filter on the enrollment; `flag` matches an integrity-flag code; `from`/`to` are ISO datetimes on `receivedAt` |
 | `GET` | `/submissions/:id` | Full detail: mediaAsset, enrollment+participant+grant, integrityFlags, emailEvidence, extractionRuns→rows/reconciliation |
 | `GET` | `/submissions/:id/media` | Streams raw bytes. Writes an `AuditEvent` on every call. `404` if unknown, `410` if the retention job has purged it |
-| `POST` | `/submissions/:id/extract` | Manual (re-)trigger — always makes a new `ExtractionRun`, never overwrites an old one |
+| `POST` | `/submissions/:id/extract` | Queues a new `ExtractionRun` (never overwrites an old one) and returns `202 {extractionRunId, status: "pending"}` at once; extraction takes a minute or two. `?force=true` reads a recording the quality assessment rejected |
+| `GET` | `/extraction-runs/:runId` | One run with rows, reconciliation and flags — poll this until `status` is `succeeded`/`failed` |
+| `GET` | `/submissions/:id/extraction-runs/:runId/rows/:sequence/crop.png` | The band of the stitched list one row was read from |
+| `GET` | `/submissions/:id/extraction-runs/:runId/evidence.pdf` | Self-contained evidence document: verdicts, rows, the stitched recording. Audit-logged (`export_evidence_pdf`) |
+| `POST` | `/enrollments/:id/sheet` | Exports the enrollment to a spreadsheet (one workbook, Summary + a tab per recording) and returns `{url, workbookUrl, documentId, mode, tabs}`. Idempotent — the same enrollment always updates the same workbook. `?submissionId=` makes `url` deep-link that recording's tab. Audit-logged (`export_sheet`) |
+| `GET` | `/sheets/:documentId` | `SHEETS_MODE=fake` only: index of the CSV tabs. Unauthenticated by design — the unguessable link is the capability, like a Sheets share link |
+| `GET` | `/sheets/:documentId/:slug.csv` | One tab as CSV (fake mode) |
+| `GET` | `/enrollments/:id/ledger` | Every clip of the enrollment as one chain-verified ledger: clips in chronological order, folded rows, chain result, breaks *between* clips counted separately |
 | `GET` | `/submissions/:id/extraction-runs` | All runs for this submission, newest first, with rows + reconciliation |
 | `GET` | `/submissions/:id/extraction-runs/:runId/panorama` | The stitched list image (PNG) that run read from. Audit-logged like raw media (`view_panorama`); 404 if the run has none, 410 if it was purged under retention |
 

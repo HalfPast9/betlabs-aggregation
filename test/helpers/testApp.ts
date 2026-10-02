@@ -5,6 +5,8 @@ import { FakeDropboxClient } from "../../src/dropbox/fakeClient.js";
 import { FakeEmailSender } from "../../src/email/sender.js";
 import { FakeVisionExtractor, type TileScript } from "../../src/extraction/fakeVisionExtractor.js";
 import { ensureBootstrapAdmin } from "../../src/lib/auth.js";
+import { createExtractionQueue } from "../../src/jobs/extractionQueue.js";
+import { FakeSheetsExporter } from "../../src/sheets/fakeSheetsExporter.js";
 import { createTmpObjectStore } from "./tmpObjectStore.js";
 
 export const STAFF_TOKEN = "test-token";
@@ -24,12 +26,19 @@ export async function buildTestContext(opts: BuildTestContextOptions = {}) {
   const emailSender = new FakeEmailSender();
   const visionExtractor = new FakeVisionExtractor(opts.visionScript);
   const { store: objectStore, cleanup: cleanupObjectStore } = await createTmpObjectStore();
+  const extractionQueue = createExtractionQueue(
+    { prisma, objectStore, visionExtractor, extractorVersion: "test", panoramaFps: 10 },
+    (err, runId) => console.error(`test extraction run ${runId} failed:`, err),
+  );
   const app = buildApp({
     prisma,
     dropbox,
     objectStore,
     emailSender,
     visionExtractor,
+    extractionQueue,
+    sheetsExporter: new FakeSheetsExporter(objectStore, "http://test.local"),
+    publicBaseUrl: "http://test.local",
     staffApiToken: STAFF_TOKEN,
     intakeRoot: INTAKE_ROOT,
     dkimResolver: opts.dkimResolver,
@@ -49,7 +58,9 @@ export async function buildTestContext(opts: BuildTestContextOptions = {}) {
     objectStore,
     emailSender,
     visionExtractor,
+    extractionQueue,
     async cleanup() {
+      await extractionQueue.drain();
       await app.close();
       await cleanupObjectStore();
       await prisma.$disconnect();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assembleRows } from "../src/extraction/assemble.js";
+import { assembleRows, foldSegments } from "../src/extraction/assemble.js";
 import type { Tile } from "../src/extraction/panorama.js";
 import type { RawExtractedRow } from "../src/extraction/visionExtractor.js";
 
@@ -96,8 +96,8 @@ describe("assembleRows — segments that overlap in content", () => {
         ],
       },
     ];
-    const result = assembleRows(tiles, reads, false);
-    expect(result.rows.map((r) => r.timestamp)).toEqual(["6:20 PM", "6:19 PM", "6:18 PM", "6:17 PM"]);
+    const rows = foldSegments(assembleRows(tiles, reads, false).rows);
+    expect(rows.map((r) => r.timestamp)).toEqual(["6:20 PM", "6:19 PM", "6:18 PM", "6:17 PM"]);
   });
 
   it("does not glue segments together on a single identical-looking row", () => {
@@ -107,6 +107,6 @@ describe("assembleRows — segments that overlap in content", () => {
       { tileIndex: 1, rows: [row({ yTop: 10, timestamp: "6:19 PM", amount: -5, balanceAfter: 55 }), row({ yTop: 110, timestamp: "6:10 PM", amount: -1, balanceAfter: 99 })] },
     ];
     // Only one row matches ("6:19 PM"); that's not enough to claim overlap.
-    expect(assembleRows(tiles, reads, false).rows).toHaveLength(4);
+    expect(foldSegments(assembleRows(tiles, reads, false).rows)).toHaveLength(4);
   });
 });

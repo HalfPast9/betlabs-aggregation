@@ -17,3 +17,11 @@ data/objects/
 # Extraction ground-truth fixtures are exported from real participant
 # recordings — keep them local (see docs/extraction-benchmark.md).
 /eval/*.json
+
+# Credentials. The Google service-account key is a private key — it belongs in
+# secrets/ (ignored wholesale) and never in git history. Broad JSON patterns
+# too, in case a key gets dropped at the repo root by accident.
+/secrets/
+/*service-account*.json
+/*credentials*.json
+/*-key.json

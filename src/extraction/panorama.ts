@@ -253,8 +253,10 @@ export interface ReconstructionPlan {
   scrollRegion: { top: number; bottom: number };
   segments: Segment[];
   gaps: ScrollGap[];
-  /** Frames dropped as torn (two render states in one frame). */
+  /** Frames the path skipped (heavy compression, partial re-render): tracked for position, never composited. */
   rejectedFrames: number[];
+  /** This recording's noise floor and the thresholds derived from it. */
+  calibration: { noiseFloor: number; scale: number; thresholds: Thresholds };
 }
 
 const COARSE_WIDTH = 64;
@@ -310,16 +312,39 @@ export async function planReconstruction(
   // skip edges win when a bad frame sits between two clean ones.
   const n = frames.files.length;
   const H = fine[0]!.height;
-  const edgeCache = new Map<string, ShiftCandidate[]>();
-  const edge = (j: number, i: number): ShiftCandidate[] => {
+  const rawEdgeCache = new Map<string, ShiftCandidate[]>();
+  const rawEdge = (j: number, i: number): ShiftCandidate[] => {
     const key = `${j}:${i}`;
-    let c = edgeCache.get(key);
+    let c = rawEdgeCache.get(key);
     if (!c) {
-      c = shiftCandidates(coarse[j]!, coarse[i]!, fine[j]!, fine[i]!).filter((x) => x.score <= MAX_PAIR_SCORE);
-      edgeCache.set(key, c);
+      c = shiftCandidates(coarse[j]!, coarse[i]!, fine[j]!, fine[i]!);
+      rawEdgeCache.set(key, c);
     }
     return c;
   };
+
+  // Calibrate the score thresholds to this recording (docs/extraction-hardening.md
+  // §6). The best consecutive-pair scores' lower quantile is the noise floor —
+  // what "identical" frames differ by here, given this recording's compression
+  // and text size. Thresholds tuned on clean recordings scale up with it.
+  // Only pairs that didn't move measure noise; a clip scrolled continuously
+  // has few of them, so fall back to the cleanest pairs overall.
+  const staticScores: number[] = [];
+  const allBest: number[] = [];
+  for (let i = 1; i < n; i++) {
+    const c = rawEdge(i - 1, i)[0];
+    if (!c) continue;
+    allBest.push(c.score);
+    if (Math.abs(c.shift) <= 1) staticScores.push(c.score);
+  }
+  const pool = staticScores.length >= 5 ? staticScores : allBest;
+  pool.sort((a, b) => a - b);
+  const noiseFloor = pool.length ? pool[Math.floor(pool.length / 2)]! : 0;
+  const scale = Math.max(1, noiseFloor / REFERENCE_NOISE_FLOOR);
+  const thresholds: Thresholds = { good: GOOD_SCORE * scale, maxPair: MAX_PAIR_SCORE * scale, cleanSource: CLEAN_SOURCE_SCORE * scale };
+  const calibration = { noiseFloor, scale, thresholds };
+
+  const edge = (j: number, i: number): ShiftCandidate[] => rawEdge(j, i).filter((x) => x.score <= thresholds.maxPair);
 
   interface State {
     cost: number;
@@ -341,7 +366,7 @@ export async function planReconstruction(
     // Skip edges are only worth computing near a poor consecutive edge —
     // including the few frames *after* one, so the path can route around
     // a bad frame that its successor happens to align to cleanly.
-    if (!(consecutive.length > 0 && consecutive[0]!.score <= GOOD_SCORE)) lastPoorEdge = i;
+    if (!(consecutive.length > 0 && consecutive[0]!.score <= thresholds.good)) lastPoorEdge = i;
     const maxBack = i - lastPoorEdge <= MAX_SKIP ? MAX_SKIP : 1;
     for (let j = i - 1; j >= Math.max(0, i - maxBack); j--) {
       if (states[j]!.length === 0 || segmentRoot[j] !== segmentRoot[i - 1]) continue;
@@ -419,9 +444,17 @@ export async function planReconstruction(
       segStart = i;
     }
   }
-  return { scrollRegion, segments, gaps, rejectedFrames: rejected };
+  return { scrollRegion, segments, gaps, rejectedFrames: rejected, calibration };
 }
 
+export interface Thresholds {
+  good: number;
+  maxPair: number;
+  cleanSource: number;
+}
+
+/** Noise floor (ink-weighted diff of near-identical consecutive frames) on a clean iOS recording. */
+const REFERENCE_NOISE_FLOOR = 3;
 /** A pair aligning at or under this ink-weighted diff is clean enough that skip edges aren't worth computing. */
 const GOOD_SCORE = 20;
 /** Ink-weighted diff above this means the two frames don't overlap at all (scene change, or a flick past a whole screen). */
@@ -499,7 +532,7 @@ export async function compositeSegment(frames: DenseFrames, plan: Reconstruction
       if (fy < 0 || fy >= regionH) continue;
       covering.push({ pi, dist: Math.min(fy, regionH - 1 - fy), score: p.alignScore });
     }
-    const clean = covering.filter((c) => c.score <= CLEAN_SOURCE_SCORE);
+    const clean = covering.filter((c) => c.score <= plan.calibration.thresholds.cleanSource);
     const pool = clean.length >= 3 ? clean : covering;
     pool.sort((a, b) => b.dist - a.dist || a.score - b.score);
     const picked: typeof pool = [];
@@ -724,16 +757,10 @@ export interface TilingOptions {
  * labels far more reliably than they localize.
  */
 export async function tilePanorama(pano: PanoramaImage, segmentIndex: number, startIndex: number, opts: TilingOptions = {}): Promise<Tile[]> {
-  const targetWidth = Math.min(opts.targetWidth ?? 600, pano.width);
+  const geo = tileGeometry(pano, opts);
   const tileHeight = opts.tileHeight ?? 1400;
   const overlap = opts.overlap ?? 320;
-  const rulerWidth = opts.rulerWidth ?? 48;
   const overlapBands = opts.overlapBands ?? 2;
-  const tickEvery = 50;
-
-  const scale = pano.width / targetWidth;
-  const resizedH = Math.round(pano.height / scale);
-  const resized = await sharp(pano.png).resize({ width: targetWidth, height: resizedH, fit: "fill" }).png().toBuffer();
 
   // Tile ranges in resized px, plus the bands each covers.
   const ranges: Array<{ y: number; h: number; bands: RowBand[] | null; firstBandIndex: number }> = [];
@@ -741,10 +768,10 @@ export async function tilePanorama(pano: PanoramaImage, segmentIndex: number, st
   if (bands) {
     let first = 0;
     while (first < bands.length) {
-      const startY = Math.round(bands[first]!.outerTop / scale);
+      const startY = Math.round(bands[first]!.outerTop / geo.scale);
       let last = first;
-      while (last + 1 < bands.length && Math.round(bands[last + 1]!.outerBottom / scale) - startY <= tileHeight) last++;
-      const endY = Math.min(resizedH, Math.round(bands[last]!.outerBottom / scale));
+      while (last + 1 < bands.length && Math.round(bands[last + 1]!.outerBottom / geo.scale) - startY <= tileHeight) last++;
+      const endY = Math.min(geo.resizedH, Math.round(bands[last]!.outerBottom / geo.scale));
       ranges.push({ y: startY, h: endY - startY, bands: bands.slice(first, last + 1), firstBandIndex: first });
       if (last >= bands.length - 1) break;
       first = Math.max(first + 1, last - overlapBands + 1);
@@ -752,38 +779,86 @@ export async function tilePanorama(pano: PanoramaImage, segmentIndex: number, st
   } else {
     let y = 0;
     while (true) {
-      const h = Math.min(tileHeight, resizedH - y);
+      const h = Math.min(tileHeight, geo.resizedH - y);
       ranges.push({ y, h, bands: null, firstBandIndex: 0 });
-      if (y + h >= resizedH) break;
+      if (y + h >= geo.resizedH) break;
       y = y + tileHeight - overlap;
     }
   }
 
   const tiles: Tile[] = [];
   let index = startIndex;
-  for (const r of ranges) {
-    const body = await sharp(resized).extract({ left: 0, top: r.y, width: targetWidth, height: r.h }).png().toBuffer();
-    const ruler = rulerSvg(rulerWidth, r.h, r.y, tickEvery);
-    const jpegBuffer = await sharp({ create: { width: targetWidth + rulerWidth, height: r.h, channels: 3, background: { r: 235, g: 235, b: 235 } } })
-      .composite([
-        { input: Buffer.from(ruler), left: 0, top: 0 },
-        { input: body, left: rulerWidth, top: 0 },
-      ])
-      .jpeg({ quality: 90 })
-      .toBuffer();
-    tiles.push({
-      index: index++,
-      segmentIndex,
-      jpegBuffer,
-      top: Math.round(r.y * scale),
-      bottom: Math.round((r.y + r.h) * scale),
-      scale,
-      rulerTickEvery: tickEvery,
-      bands: r.bands,
-      firstBandIndex: r.firstBandIndex,
-    });
-  }
+  for (const r of ranges) tiles.push(await renderTile(geo, r, index++, segmentIndex, opts));
   return tiles;
+}
+
+/**
+ * One tile over a specific band range — used to re-read the rows around a
+ * chain break with a band of context on each side, so the model sees them
+ * in a different framing than the first time (docs/extraction-hardening.md §2).
+ */
+export async function cutBandTile(
+  pano: PanoramaImage,
+  bands: RowBand[],
+  firstBand: number,
+  lastBand: number,
+  segmentIndex: number,
+  index: number,
+  opts: TilingOptions = {},
+): Promise<Tile> {
+  const geo = tileGeometry(pano, opts);
+  const first = Math.max(0, firstBand);
+  const last = Math.min(bands.length - 1, lastBand);
+  const startY = Math.round(bands[first]!.outerTop / geo.scale);
+  const endY = Math.min(geo.resizedH, Math.round(bands[last]!.outerBottom / geo.scale));
+  return renderTile(geo, { y: startY, h: endY - startY, bands: bands.slice(first, last + 1), firstBandIndex: first }, index, segmentIndex, opts);
+}
+
+interface TileGeometry {
+  resized: Promise<Buffer>;
+  targetWidth: number;
+  resizedH: number;
+  scale: number;
+}
+
+function tileGeometry(pano: PanoramaImage, opts: TilingOptions): TileGeometry {
+  const targetWidth = Math.min(opts.targetWidth ?? 600, pano.width);
+  const scale = pano.width / targetWidth;
+  const resizedH = Math.round(pano.height / scale);
+  const resized = sharp(pano.png).resize({ width: targetWidth, height: resizedH, fit: "fill" }).png().toBuffer();
+  return { resized, targetWidth, resizedH, scale };
+}
+
+async function renderTile(
+  geo: TileGeometry,
+  r: { y: number; h: number; bands: RowBand[] | null; firstBandIndex: number },
+  index: number,
+  segmentIndex: number,
+  opts: TilingOptions,
+): Promise<Tile> {
+  const rulerWidth = opts.rulerWidth ?? 48;
+  const tickEvery = 50;
+  const resized = await geo.resized;
+  const body = await sharp(resized).extract({ left: 0, top: r.y, width: geo.targetWidth, height: r.h }).png().toBuffer();
+  const ruler = rulerSvg(rulerWidth, r.h, r.y, tickEvery);
+  const jpegBuffer = await sharp({ create: { width: geo.targetWidth + rulerWidth, height: r.h, channels: 3, background: { r: 235, g: 235, b: 235 } } })
+    .composite([
+      { input: Buffer.from(ruler), left: 0, top: 0 },
+      { input: body, left: rulerWidth, top: 0 },
+    ])
+    .jpeg({ quality: 90 })
+    .toBuffer();
+  return {
+    index,
+    segmentIndex,
+    jpegBuffer,
+    top: Math.round(r.y * geo.scale),
+    bottom: Math.round((r.y + r.h) * geo.scale),
+    scale: geo.scale,
+    rulerTickEvery: tickEvery,
+    bands: r.bands,
+    firstBandIndex: r.firstBandIndex,
+  };
 }
 
 function rulerSvg(width: number, height: number, yOffset: number, tickEvery: number): string {

@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { AppDeps } from "../app.js";
+import { buildLedger } from "../extraction/ledger.js";
 import { requireStaffAuth } from "../lib/auth.js";
 import { recordTransition } from "../enrollment/decisions.js";
 import { runPreFundingChecks } from "../enrollment/preFundingChecks.js";
@@ -181,6 +182,16 @@ export async function registerEnrollmentRoutes(app: FastifyInstance, opts: { dep
       }
     });
   }
+
+  // Every clip the participant sent, as one chain-verified ledger.
+  app.get<{ Params: { id: string } }>("/enrollments/:id/ledger", async (request, reply) => {
+    const enrollment = await deps.prisma.enrollment.findUnique({ where: { id: request.params.id } });
+    if (!enrollment) {
+      reply.code(404).send({ error: "enrollment not found" });
+      return;
+    }
+    reply.send(await buildLedger(deps.prisma, enrollment.id));
+  });
 
   app.get<{ Params: { id: string } }>("/enrollments/:id/decisions", async (request, reply) => {
     const decisions = await deps.prisma.decision.findMany({

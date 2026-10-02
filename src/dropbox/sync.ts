@@ -3,23 +3,16 @@ import type { DropboxClient } from "./types.js";
 import type { ObjectStore } from "../storage/objectStore.js";
 import { sha256Hex } from "../lib/hash.js";
 import { handleWagerRecordingSubmitted } from "../enrollment/wagerRecordingIngested.js";
-import { runExtraction } from "../extraction/runExtraction.js";
-import type { VisionExtractor } from "../extraction/visionExtractor.js";
+import type { ExtractionQueue } from "../jobs/extractionQueue.js";
 import type { AppDeps } from "../app.js";
-
-export interface AutoExtractConfig {
-  visionExtractor: VisionExtractor;
-  extractorVersion: string;
-  panoramaFps: number;
-}
 
 export interface SyncDeps {
   prisma: PrismaClient;
   dropbox: DropboxClient;
   objectStore: ObjectStore;
   intakeRoot: string;
-  /** When set, extraction runs automatically right after a wager recording is archived. */
-  autoExtract?: AutoExtractConfig;
+  /** When set, extraction is queued automatically right after a wager recording is archived. */
+  autoExtract?: ExtractionQueue;
 }
 
 /** Shared by the webhook handler and the polling job so their SyncDeps never drift apart. */
@@ -29,13 +22,7 @@ export function buildSyncDeps(deps: AppDeps): SyncDeps {
     dropbox: deps.dropbox,
     objectStore: deps.objectStore,
     intakeRoot: deps.intakeRoot,
-    autoExtract: deps.autoExtractOnIngest
-      ? {
-          visionExtractor: deps.visionExtractor,
-          extractorVersion: deps.extractorVersion,
-          panoramaFps: deps.panoramaFps,
-        }
-      : undefined,
+    autoExtract: deps.autoExtractOnIngest ? deps.extractionQueue : undefined,
   };
 }
 
@@ -125,20 +112,7 @@ export async function syncDropbox(deps: SyncDeps): Promise<SyncResult> {
       await safeDelete(dropbox, entry.pathLower);
 
       if (advancedToWagerSubmitted && deps.autoExtract) {
-        try {
-          await runExtraction(
-            {
-              prisma,
-              objectStore,
-              visionExtractor: deps.autoExtract.visionExtractor,
-              extractorVersion: deps.autoExtract.extractorVersion,
-              panoramaFps: deps.autoExtract.panoramaFps,
-            },
-            submissionId,
-          );
-        } catch (err) {
-          console.error(`Auto-extraction failed for submission ${submissionId}:`, err);
-        }
+        await deps.autoExtract.enqueue(submissionId);
       }
     }
 

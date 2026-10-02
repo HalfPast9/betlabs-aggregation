@@ -53,6 +53,16 @@
   .pano-highlight { position: absolute; left: 0; width: 100%; border: 2px solid var(--accent); background: rgba(79,140,255,.18); pointer-events: none; opacity: 0; transition: opacity .15s ease; }
   .pano-highlight.show { opacity: 1; }
   tr.partial td { opacity: .6; }
+  tr.break-mark td { box-shadow: inset 3px 0 0 var(--danger); }
+  .thumb { display: block; width: 150px; height: 34px; background: #000; border-radius: 3px; image-rendering: auto; }
+  .quality { padding: 10px 12px; border-radius: 6px; margin-bottom: 10px; font-size: 13px; }
+  .quality.warn { background: rgba(217,154,27,.12); border: 1px solid rgba(217,154,27,.4); }
+  .quality.reject { background: rgba(229,83,75,.12); border: 1px solid rgba(229,83,75,.4); }
+  .quality.ok { background: rgba(63,185,80,.1); border: 1px solid rgba(63,185,80,.35); }
+  .check { font-size: 12px; }
+  .check.ok { color: var(--ok); } .check.bad { color: var(--warn); cursor: help; }
+  .breaks { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }
+  .breaks a { cursor: pointer; }
   .rowlist { max-height: 480px; overflow: auto; }
   .rowlist tr { cursor: pointer; }
   .rowlist tr.active td { background: rgba(79,140,255,.15); }
@@ -280,18 +290,21 @@ async function viewSubmission(root, id) {
         }
       </div>
       <div class="panel">
-        <h3>Extracted rows ${run ? `<span class="small muted">(run ${fmtDate(run.startedAt)}, ${run.status}${run.costUsd != null ? ", $" + Number(run.costUsd).toFixed(4) : ""}${run.frameCount != null ? `, ${run.frameCount} frames → ${run.tileCount} tile${run.tileCount === 1 ? "" : "s"}` : ""})</span>` : ""}</h3>
+        <h3>Extracted rows ${run ? `<span class="small muted">(run ${fmtDate(run.startedAt)}, <span id="runStatus">${esc(run.status)}</span>${run.costUsd != null ? ", $" + Number(run.costUsd).toFixed(4) : ""}${run.frameCount != null ? `, ${run.frameCount} frames → ${run.tileCount} tile${run.tileCount === 1 ? "" : "s"}` : ""}${run.retryTiles ? `, ${run.retryTiles} re-read` : ""}${run.crossCheckModel ? `, cross-checked by ${esc(run.crossCheckModel)}` : ""})</span>` : ""}</h3>
+        ${run && (run.status === "pending" || run.status === "running") ? `<p class="small muted" id="runProgress">Extracting… this takes a minute or two (reconstructing the scroll, then reading it). This page updates itself.</p>` : ""}
+        ${run && run.quality ? qualityBox(run.quality, run) : ""}
         ${
           run && run.reconciliation
             ? `<p class="small">Wagered <b>${Number(run.reconciliation.wageredTotal).toFixed(2)}</b>
                ${run.reconciliation.grantedAmount != null ? `vs granted <b>${Number(run.reconciliation.grantedAmount).toFixed(2)}</b>` : ""}
                — arithmetic ${run.reconciliation.arithmeticOk ? '<span class="ok-text">ok</span>' : '<span class="error">mismatch</span>'}
-               ${chainSummary(run.reconciliation)}</p>`
+               ${chainSummary(run.reconciliation)}</p>
+               ${breakList(run.reconciliation)}`
             : ""
         }
         <div class="rowlist">
           <table>
-            <thead><tr><th>t</th><th>Timestamp</th><th>Type</th><th>Description</th><th>Amount</th><th>Balance (before→after)</th><th>Conf.</th></tr></thead>
+            <thead><tr><th>#</th><th>Read from</th><th>Timestamp</th><th>Type</th><th>Description</th><th>Amount</th><th>Balance (before→after)</th><th>Check</th></tr></thead>
             <tbody id="rowsBody">
               ${
                 run && run.rows.length
@@ -305,24 +318,33 @@ async function viewSubmission(root, id) {
                           ? ` data-box-x="${r.boxX}" data-box-y="${r.boxY}" data-box-w="${r.boxW}" data-box-h="${r.boxH}"`
                           : "";
                         const panoAttrs = r.panoramaTop != null ? ` data-pano-top="${r.panoramaTop}" data-pano-bottom="${r.panoramaBottom}"` : "";
+                        const check = r.crossChecked
+                          ? r.disagreements && r.disagreements.length
+                            ? `<span class="check bad" title="second read disagreed on: ${esc(r.disagreements.join(", "))}">⚠ ${esc(r.disagreements.join(", "))}</span>`
+                            : '<span class="check ok" title="second read agreed">✓</span>'
+                          : '<span class="check muted" title="not cross-checked">—</span>';
                         return `<tr data-t="${r.sourceFrameTs ?? ""}"${boxAttrs}${panoAttrs} id="row-${i}" class="${r.partial ? "partial" : ""}" title="${r.partial ? "cut off at the edge of the recording — partial read" : ""}">
-                          <td>${r.sourceFrameTs != null ? Number(r.sourceFrameTs).toFixed(1) + "s" : "—"}</td>
+                          <td class="small muted">${i}</td>
+                          <td><canvas class="thumb" data-thumb-top="${r.panoramaTop ?? ""}" data-thumb-bottom="${r.panoramaBottom ?? ""}" width="300" height="68"></canvas></td>
                           <td>${esc(r.timestamp ? fmtDate(r.timestamp) : "—")}</td>
                           <td>${esc(r.type || "—")}</td>
                           <td class="small muted">${esc(r.description || "—")}</td>
                           <td>${r.amount != null ? Number(r.amount).toFixed(2) : "—"}</td>
                           <td>${balanceCell}</td>
-                          <td>${r.confidence != null ? Number(r.confidence).toFixed(2) : "—"}</td>
+                          <td>${check}</td>
                         </tr>`;
                       })
                       .join("")
-                  : `<tr><td colspan="7" class="muted">No extraction run yet.</td></tr>`
+                  : `<tr><td colspan="8" class="muted">${run && (run.status === "pending" || run.status === "running") ? "Extracting…" : run && run.quality && run.quality.verdict === "reject" ? "Not read — recording rejected (see above)." : "No extraction run yet."}</td></tr>`
               }
             </tbody>
           </table>
         </div>
         <div class="row">
           <button id="extractBtn">${run ? "Re-run extraction" : "Run extraction"}</button>
+          ${run && run.status === "succeeded" ? `<button id="pdfBtn">Export evidence PDF</button>` : ""}
+          <button id="sheetBtn" title="Export this enrollment to a spreadsheet and open this recording's tab">Open in Sheets</button>
+          ${run && run.quality && run.quality.verdict === "reject" ? `<button id="forceBtn" class="danger" title="Read the recording despite the quality verdict">Extract anyway</button>` : ""}
         </div>
       </div>
     </div>
@@ -407,19 +429,122 @@ async function viewSubmission(root, id) {
     });
   });
 
+  const trigger = async (btn, force) => {
+    btn.disabled = true; btn.textContent = "Queued…";
+    try {
+      await api(`/submissions/${id}/extract${force ? "?force=true" : ""}`, { method: "POST" });
+      viewSubmission(root, id);
+    } catch (e) {
+      alert("Extraction failed to start: " + e.message);
+      btn.disabled = false;
+    }
+  };
   const extractBtn = root.querySelector("#extractBtn");
-  if (extractBtn) {
-    extractBtn.addEventListener("click", async () => {
-      extractBtn.disabled = true; extractBtn.textContent = "Running…";
-      try {
-        await api(`/submissions/${id}/extract`, { method: "POST" });
-        viewSubmission(root, id);
-      } catch (e) {
-        alert("Extraction failed: " + e.message);
-        extractBtn.disabled = false;
-      }
-    });
+  if (extractBtn) extractBtn.addEventListener("click", () => trigger(extractBtn, false));
+  const forceBtn = root.querySelector("#forceBtn");
+  if (forceBtn) forceBtn.addEventListener("click", () => trigger(forceBtn, true));
+  const sheetBtn = root.querySelector("#sheetBtn");
+  if (sheetBtn) sheetBtn.addEventListener("click", () => exportSheet(sheetBtn, s.enrollment.id, id));
+
+  const pdfBtn = root.querySelector("#pdfBtn");
+  if (pdfBtn) pdfBtn.addEventListener("click", async () => {
+    pdfBtn.disabled = true;
+    try {
+      const res = await api(`/submissions/${id}/extraction-runs/${run.id}/evidence.pdf`);
+      downloadBlob(await res.blob(), `evidence-${id.slice(0, 8)}.pdf`);
+    } catch (e) { alert("Export failed: " + e.message); } finally { pdfBtn.disabled = false; }
+  });
+
+  // Row thumbnails: the exact band each row was read from, cut from the
+  // panorama already loaded above — no extra requests.
+  const panoImgEl = root.querySelector("#panoImg");
+  if (panoImgEl) {
+    const draw = () => {
+      root.querySelectorAll("canvas.thumb").forEach((c) => {
+        const top = Number(c.dataset.thumbTop), bottom = Number(c.dataset.thumbBottom);
+        if (!c.dataset.thumbTop || !(bottom > top)) return;
+        const ctx = c.getContext("2d");
+        const h = bottom - top;
+        const scale = c.width / panoImgEl.naturalWidth;
+        c.height = Math.max(24, Math.round(h * scale));
+        ctx.drawImage(panoImgEl, 0, top, panoImgEl.naturalWidth, h, 0, 0, c.width, c.height);
+      });
+    };
+    if (panoImgEl.complete && panoImgEl.naturalWidth) draw(); else panoImgEl.addEventListener("load", draw);
   }
+
+  // Chain breaks: click to jump to the rows on either side.
+  root.querySelectorAll("[data-break-row]").forEach((a) => {
+    a.addEventListener("click", () => {
+      const i = Number(a.dataset.breakRow);
+      root.querySelectorAll("#rowsBody tr").forEach((x) => x.classList.remove("break-mark", "active"));
+      for (const k of [i - 1, i]) {
+        const tr = root.querySelector(`#row-${k}`);
+        if (tr) tr.classList.add("break-mark");
+      }
+      const target = root.querySelector(`#row-${i}`);
+      if (target) { target.scrollIntoView({ block: "center" }); target.click(); }
+    });
+  });
+
+  // A queued/running extraction: poll until it settles, then re-render.
+  if (run && (run.status === "pending" || run.status === "running")) {
+    const poll = async () => {
+      if (!document.contains(root) || !location.hash.includes(id)) return;
+      try {
+        const latest = await api(`/extraction-runs/${run.id}`);
+        if (latest.status === "pending" || latest.status === "running") {
+          const st = root.querySelector("#runStatus"); if (st) st.textContent = latest.status;
+          setTimeout(poll, 3000);
+        } else {
+          viewSubmission(root, id);
+        }
+      } catch { setTimeout(poll, 5000); }
+    };
+    setTimeout(poll, 3000);
+  }
+}
+
+/**
+ * Export the enrollment's workbook and open it. The export is idempotent —
+ * the same enrollment always updates the same spreadsheet — so the button is
+ * safe to press repeatedly, and after a re-extraction it refreshes the data.
+ * A popup blocker would eat window.open() after the await, so the tab is
+ * claimed first and pointed at the URL when it arrives.
+ */
+async function exportSheet(btn, enrollmentId, submissionId) {
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = "Exporting…";
+  const tab = window.open("", "_blank");
+  try {
+    const q = submissionId ? `?submissionId=${encodeURIComponent(submissionId)}` : "";
+    const res = await api(`/enrollments/${enrollmentId}/sheet${q}`, { method: "POST" });
+    if (tab) tab.location = res.url; else location.href = res.url;
+  } catch (e) {
+    if (tab) tab.close();
+    alert("Sheet export failed: " + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = label;
+  }
+}
+
+function qualityBox(q, run) {
+  const label = q.verdict === "reject" ? "Recording rejected" : q.verdict === "warn" ? "Recording quality" : "Recording quality: good";
+  const m = q.metrics || {};
+  const facts = [
+    m.durationSeconds != null ? `${Number(m.durationSeconds).toFixed(1)}s` : null,
+    m.rowBands != null ? `${m.rowBands} row bands` : null,
+    m.segments != null ? `${m.segments} segment${m.segments === 1 ? "" : "s"}` : null,
+    m.untrustedFrames != null && m.frameCount ? `${Math.round(100 * m.untrustedFrames / m.frameCount)}% frames skipped` : null,
+    m.noiseFloor != null ? `noise ${Number(m.noiseFloor).toFixed(1)}` : null,
+  ].filter(Boolean).join(" · ");
+  return `<div class="quality ${esc(q.verdict)}"><b>${label}</b>${q.reasons && q.reasons.length ? "<ul class='breaks'>" + q.reasons.map((r) => `<li>${esc(r)}</li>`).join("") + "</ul>" : ""}<div class="small muted">${esc(facts)}</div></div>`;
+}
+
+function breakList(rec) {
+  const breaks = Array.isArray(rec.chainBreaks) ? rec.chainBreaks : [];
+  if (!breaks.length) return "";
+  return `<ul class="breaks">${breaks.map((b) => `<li><a data-break-row="${b.rowIndex}">row ${b.rowIndex}</a> — ${esc(b.detail)}</li>`).join("")}</ul>`;
 }
 
 async function viewParticipants(root) {
@@ -466,9 +591,11 @@ async function viewParticipant(root, id) {
           <h3 style="margin:0">${esc(e.casino)} — <code>${esc(e.state)}</code></h3>
           <div>
             <button onclick="fileRequestFor('${e.id}')">Create file request</button>
+            <button class="sheet-btn" data-enrollment="${e.id}">${e.sheetUrl ? "Update spreadsheet" : "Export to Sheets"}</button>
           </div>
         </div>
         ${e.grant ? `<p class="small">Granted ${Number(e.grant.amount).toFixed(2)} on ${fmtDate(e.grant.sentAt)} via ${esc(e.grant.method || "—")}</p>` : ""}
+        <div class="small" id="ledger-${e.id}"><span class="muted">Loading ledger…</span></div>
         <table>
           <thead><tr><th>Received</th><th>Kind</th><th>Channel</th><th>Flags</th></tr></thead>
           <tbody>
@@ -480,6 +607,26 @@ async function viewParticipant(root, id) {
       </div>`,
       )
       .join("")}`;
+
+  root.querySelectorAll(".sheet-btn").forEach((btn) => {
+    btn.addEventListener("click", () => exportSheet(btn, btn.dataset.enrollment, null));
+  });
+
+  // Combined ledger across every clip of each enrollment.
+  for (const e of p.enrollments) {
+    const holder = root.querySelector(`#ledger-${CSS.escape(e.id)}`);
+    if (!holder) continue;
+    api(`/enrollments/${e.id}/ledger`).then((l) => {
+      if (!l.clips.length) { holder.innerHTML = '<span class="muted">No extracted recordings yet.</span>'; return; }
+      const chain = l.chain.checkedRows === 0
+        ? '<span class="muted">chain not checkable</span>'
+        : l.chain.complete
+          ? `<span class="ok-text">chain complete</span> (${Number(l.chain.startBalance).toFixed(2)} → ${Number(l.chain.endBalance).toFixed(2)})`
+          : `<span class="error">${l.chain.breaks.length} break${l.chain.breaks.length === 1 ? "" : "s"}</span>${l.betweenClips ? `, ${l.betweenClips} between clips` : ""}`;
+      holder.innerHTML = `<b>Ledger:</b> ${l.rows.length} rows across ${l.clips.length} clip${l.clips.length === 1 ? "" : "s"} · wagered <b>${Number(l.wageredTotal).toFixed(2)}</b> · ${chain}
+        <span class="muted">· clips: ${l.clips.map((c) => `<a href="#/submission/${c.submissionId}">${esc(c.submissionId.slice(0, 8))}</a> (${c.rows} rows${c.chainStart != null ? `, ${Number(c.chainStart).toFixed(2)}→${Number(c.chainEnd).toFixed(2)}` : ""})`).join(", ")}</span>`;
+    }).catch((err) => { holder.innerHTML = `<span class="error">${esc(err.message)}</span>`; });
+  }
 
   root.querySelector("#newEnrollBtn").addEventListener("click", async () => {
     const casino = root.querySelector("#newCasino").value.trim();

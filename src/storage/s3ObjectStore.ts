@@ -5,7 +5,7 @@ import {
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
-import type { ObjectStore } from "./objectStore.js";
+import type { ObjectStore, PutOptions } from "./objectStore.js";
 
 export interface S3ObjectStoreOptions {
   bucket: string;
@@ -38,8 +38,8 @@ export class S3ObjectStore implements ObjectStore {
     });
   }
 
-  async put(key: string, data: Buffer): Promise<void> {
-    if (await this.exists(key)) return;
+  async put(key: string, data: Buffer, opts: PutOptions = {}): Promise<void> {
+    if (!opts.overwrite && (await this.exists(key))) return;
     await this.client.send(
       new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: data }),
     );

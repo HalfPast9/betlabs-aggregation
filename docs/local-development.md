@@ -75,6 +75,12 @@ to find what's missing).
 | `VISION_MODE` | `fake` | `fake` \| `claude` |
 | `ANTHROPIC_API_KEY` | — | Only read in `claude` mode |
 | `CLAUDE_VISION_MODEL` | `claude-sonnet-5` | Each row is read once off the stitched panorama, so cost tracks row count (~$0.002/row on Sonnet 5). Don't swap in a cheaper model without measuring it — see `extraction-benchmark.md` |
+| `CROSSCHECK_VISION_MODEL` | `claude-haiku-4-5` | Independent second read of every tile, compared field by field — the only check timestamps and descriptions get. `off` disables. ~+25% cost |
+| `SHEETS_MODE` | `fake` | `fake` \| `google`. Fake writes CSV tabs to the object store, served from `/sheets/:id` — no credentials needed |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | — | Path to the service-account key file, or the JSON itself. Required in `google` mode ([setup](google-sheets-setup.md)) |
+| `SHEETS_SHARE_WITH` | — | Comma-separated emails each workbook is shared with. Required in `google` mode — a workbook the robot owns is invisible otherwise |
+| `SHEETS_DRIVE_FOLDER_ID` | — | **Required in practice** for `google` mode: a Shared Drive (or folder in one) the service account is a member of. Service accounts have no Drive storage of their own and can't create files anywhere else |
+| `PUBLIC_BASE_URL` | `http://localhost:3000` | How this service is reached; used for links inside exports |
 | `EXTRACTOR_VERSION` | `v1` | Tag stored on every `ExtractionRun` |
 | `PANORAMA_FPS` | `10` | Decode rate for scroll reconstruction (local CPU only). Denser keeps consecutive frames overlapping through fast flicks |
 | `AUTO_EXTRACT_ON_INGEST` | `true` | Run extraction immediately after a wager recording is archived |

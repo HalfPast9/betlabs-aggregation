@@ -209,14 +209,7 @@ export function assembleRows(tiles: Tile[], reads: TileReadResult[], scrollsTowa
     placed.splice(i + 1, 1);
   }
 
-  // Segments separated by a gap can still overlap in content — the recording
-  // glitched or the participant scrolled back and the same rows were
-  // captured twice. Fold each segment into what's been merged so far by
-  // ordered content match; only its unmatched rows are new.
-  const merged = mergeSegments(placed);
-  conflicts += merged.conflicts;
-  const ordered = merged.rows;
-
+  const ordered = placed;
   const rows: AssembledRow[] = ordered.map((p, i) => {
     const next = ordered[i + 1];
     const bottom = p.bottom ?? (next && next.segmentIndex === p.segmentIndex && next.y > p.y ? next.y : p.y + rowH);
@@ -240,21 +233,37 @@ export function assembleRows(tiles: Tile[], reads: TileReadResult[], scrollsTowa
 }
 
 /**
- * Fold segments (already in display order) into one list. A segment whose
- * rows, in order, content-match a contiguous run of the list so far is the
- * same content seen again: pair the matches, keep only the rest. Needs at
- * least two matched rows so a single identical-looking transaction can't
- * glue two genuinely different stretches together.
+ * Fold segments (already in display order) into one list. Segments separated
+ * by a gap can still overlap in content — the recording glitched or the
+ * participant scrolled back and the same rows were captured twice, or one
+ * page of a paginated list ends where the next begins. A segment whose rows,
+ * in order, content-match a contiguous run of the list so far is the same
+ * content seen again: pair the matches, keep only the rest. Needs at least
+ * two informative matches so a single identical-looking transaction can't
+ * glue two genuinely different stretches together. Runs after normalization
+ * so that model quirks (an extra "$0 win" row in one read) don't break the
+ * alignment.
  */
-function mergeSegments(placed: Placed[]): { rows: Placed[]; conflicts: number } {
+export function foldSegments(rows: AssembledRow[]): AssembledRow[] {
   const segmentOrder: number[] = [];
-  for (const p of placed) if (!segmentOrder.includes(p.segmentIndex)) segmentOrder.push(p.segmentIndex);
-  if (segmentOrder.length < 2) return { rows: placed, conflicts: 0 };
+  for (const r of rows) if (!segmentOrder.includes(r.segmentIndex)) segmentOrder.push(r.segmentIndex);
+  if (segmentOrder.length < 2) return rows;
 
-  let list = placed.filter((p) => p.segmentIndex === segmentOrder[0]);
-  let conflicts = 0;
+  const asRaw = (r: AssembledRow): RawExtractedRow => ({
+    timestamp: r.timestamp,
+    type: r.type as RawExtractedRow["type"],
+    description: r.description,
+    amount: r.amount,
+    balanceBefore: r.balanceBefore,
+    balanceAfter: r.balanceAfter,
+    confidence: r.confidence,
+    fullyVisible: !r.partial,
+    yTop: null,
+  });
+
+  let list = rows.filter((r) => r.segmentIndex === segmentOrder[0]);
   for (const seg of segmentOrder.slice(1)) {
-    const b = placed.filter((p) => p.segmentIndex === seg);
+    const b = rows.filter((r) => r.segmentIndex === seg);
     let best: { o: number; pairs: number } | null = null;
     for (let o = -(b.length - 1); o < list.length; o++) {
       let pairs = 0;
@@ -263,9 +272,9 @@ function mergeSegments(placed: Placed[]): { rows: Placed[]; conflicts: number } 
       for (let j = 0; j < b.length; j++) {
         const i = j + o;
         if (i < 0 || i >= list.length) continue;
-        const pa = list[i]!.row;
-        const pb = b[j]!.row;
-        if (!compatible(pa, pb)) {
+        const pa = list[i]!;
+        const pb = b[j]!;
+        if (!compatible(asRaw(pa), asRaw(pb))) {
           ok = false;
           break;
         }
@@ -279,20 +288,17 @@ function mergeSegments(placed: Placed[]): { rows: Placed[]; conflicts: number } 
       list = [...list, ...b];
       continue;
     }
-    const before: Placed[] = [];
-    const after: Placed[] = [];
+    const before: AssembledRow[] = [];
+    const after: AssembledRow[] = [];
     for (let j = 0; j < b.length; j++) {
       const i = j + best.o;
       if (i < 0) before.push(b[j]!);
       else if (i >= list.length) after.push(b[j]!);
-      else if (quality(b[j]!.row) > quality(list[i]!.row)) {
-        list[i]!.row = b[j]!.row;
-        list[i]!.tileIndex = b[j]!.tileIndex;
-      }
+      else if (quality(asRaw(b[j]!)) > quality(asRaw(list[i]!))) list[i] = { ...b[j]!, segmentIndex: list[i]!.segmentIndex, panoramaTop: list[i]!.panoramaTop, panoramaBottom: list[i]!.panoramaBottom };
     }
     list = [...before, ...list, ...after];
   }
-  return { rows: list, conflicts };
+  return list;
 }
 
 /**

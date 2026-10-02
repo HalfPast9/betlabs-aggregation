@@ -44,6 +44,22 @@ const envSchema = z.object({
   // whole system hinges on. See docs/extraction-benchmark.md for how to
   // evaluate a cheaper/optimized model against this one.
   CLAUDE_VISION_MODEL: z.string().default("claude-sonnet-5"),
+  // Independent second read of every tile, compared field by field against
+  // the primary — the only check timestamps and descriptions get. "off"
+  // disables it. Roughly +25% cost at Haiku prices.
+  CROSSCHECK_VISION_MODEL: z.string().default("claude-haiku-4-5"),
+
+  // Spreadsheet export (one workbook per enrollment, a tab per recording).
+  // fake = CSV tabs in the object store, served from /sheets/:id — the whole
+  // flow works with no Google credentials.
+  SHEETS_MODE: z.enum(["fake", "google"]).default("fake"),
+  /** Path to the service-account JSON key, or the JSON itself. */
+  GOOGLE_SERVICE_ACCOUNT_JSON: z.string().optional(),
+  /** Comma-separated emails each created workbook is shared with — without one, nobody can open it. */
+  SHEETS_SHARE_WITH: z.string().default(""),
+  SHEETS_DRIVE_FOLDER_ID: z.string().optional(),
+  /** Used to build links in exports and in the fake exporter's URLs. */
+  PUBLIC_BASE_URL: z.string().default("http://localhost:3000"),
 
   EXTRACTOR_VERSION: z.string().default("v1"),
   // Decode rate for scroll reconstruction. Denser sampling keeps consecutive
@@ -70,6 +86,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
   if (parsed.data.VISION_MODE === "claude" && !parsed.data.ANTHROPIC_API_KEY) {
     throw new Error("ANTHROPIC_API_KEY is required when VISION_MODE=claude");
+  }
+  if (parsed.data.SHEETS_MODE === "google") {
+    if (!parsed.data.GOOGLE_SERVICE_ACCOUNT_JSON) throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON is required when SHEETS_MODE=google");
+    if (!parsed.data.SHEETS_SHARE_WITH.trim()) {
+      throw new Error("SHEETS_SHARE_WITH is required when SHEETS_MODE=google — a workbook a service account owns is invisible until it's shared with someone");
+    }
   }
   return parsed.data;
 }
